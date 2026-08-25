@@ -201,6 +201,24 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `catalog matches a romanized russian title like brat to Брат`() {
+        assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
+        assertEquals(listOf("brat", "брат"), TitleCatalog.searchQueries("brat"))
+
+        val local = MediaParser.parse(Path.of("brat.1997.dvdrip.mp4"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit("ПоискКино", "Брат 2", 2000, null, originalTitle = "Brat 2", russianTitle = "Брат 2"),
+                CatalogHit("ПоискКино", "Брат", 1997, null, originalTitle = "Brat", russianTitle = "Брат"),
+            ),
+        )
+
+        assertEquals("Брат", hit?.title)
+        assertEquals(1997, hit?.year)
+    }
+
+    @Test
     fun `catalog prefers the title with the matching year`() {
         val local = MediaParser.parse(Path.of("The.Matrix.1999.1080p.mkv"))
         val hit = TitleCatalog.pickBest(
@@ -415,13 +433,14 @@ class MovieRenamerTest {
             russianTitle = "Дюна",
             originalLanguage = "en",
             genres = listOf("Фантастика", "Приключения", "Драма"),
+            directors = listOf("Дени Вильнёв"),
             actors = listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"),
             rating = 8.2,
             ratingSource = "TMDB",
         )
 
         assertEquals(
-            "Dune — Дюна (2021) [Фантастика, Приключения, Драма] " +
+            "Dune — Дюна (2021) [Фантастика, Приключения, Драма] [Дени Вильнёв] " +
                 "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
@@ -434,12 +453,13 @@ class MovieRenamerTest {
             russianTitle = "Брат",
             originalLanguage = "ru",
             genres = listOf("Драма", "Криминал"),
+            directors = listOf("Алексей Балабанов"),
             actors = listOf("Сергей Бодров мл.", "Виктор Сухоруков", "Светлана Письмиченко"),
             rating = 7.9,
             ratingSource = "TMDB",
         )
         assertEquals(
-            "Брат (1997) [Драма, Криминал] " +
+            "Брат (1997) [Драма, Криминал] [Алексей Балабанов] " +
                 "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p.mkv",
             NameFormatter.fileName(movie, "mkv"),
         )
@@ -476,6 +496,10 @@ class MovieRenamerTest {
                   {"name": "Тимоти Шаламе", "order": 0},
                   {"name": "Ребекка Фергюсон", "order": 1},
                   {"name": "Джейсон Момоа", "order": 3}
+                ],
+                "crew": [
+                  {"name": "Дени Вильнёв", "job": "Director"},
+                  {"name": "Джо Спайкс", "job": "Producer"}
                 ]
               }
             }
@@ -486,6 +510,7 @@ class MovieRenamerTest {
         assertEquals("Dune", hit?.originalTitle)
         assertEquals(2021, hit?.year)
         assertEquals(listOf("Фантастика", "Приключения", "Драма"), hit?.genres)
+        assertEquals(listOf("Дени Вильнёв"), hit?.directors)
         assertEquals(listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"), hit?.actors)
         assertEquals(7.8, hit?.rating)
         assertEquals("TMDB", hit?.ratingSource)
@@ -541,6 +566,7 @@ class MovieRenamerTest {
         assertEquals("The Matrix", hit?.originalTitle)
         assertEquals(1999, hit?.year)
         assertEquals(listOf("Фантастика", "Боевик", "Триллер"), hit?.genres)
+        assertEquals(listOf("Лана Вачовски"), hit?.directors)
         assertEquals(listOf("Киану Ривз", "Лоренс Фишбёрн", "Кэрри-Энн Мосс"), hit?.actors)
         assertEquals(8.5, hit?.rating)
         assertEquals("КП", hit?.ratingSource)
@@ -665,6 +691,7 @@ class MovieRenamerTest {
             russianTitle = "Дюна",
             originalLanguage = "en",
             genres = listOf("Фантастика"),
+            directors = listOf("Дени Вильнёв"),
             actors = listOf("Тимоти Шаламе"),
             rating = 7.8,
             ratingSource = "TMDB",
@@ -753,6 +780,7 @@ class MovieRenamerTest {
             originalTitle = "The Matrix",
             russianTitle = "Матрица",
             genres = listOf("Фантастика"),
+            directors = listOf("Лана Вачовски"),
             actors = listOf("Киану Ривз"),
             rating = 8.5,
             ratingSource = "КП",

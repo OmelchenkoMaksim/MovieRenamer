@@ -19,7 +19,8 @@ out/
 # Local machine / secrets
 local.properties
 *.log
-/start/src/main/kotlin/movierenamer/catalog-tokens.properties
+catalog-tokens.properties
+**/catalog-tokens.properties
 
 # Local library used for scanning (not source)
 /movies/
