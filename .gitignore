@@ -1,15 +1,47 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Kotlin incremental compiler
+.kotlin/
+
+# IntelliJ / Android Studio / Cursor
+.idea/
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+*.ipr
+*.iws
+out/
+
+# VS Code
+.vscode/
+
+# Local machine / secrets
+local.properties
+*.log
+
+# Local library used for scanning (not source)
+/movies/
+
+# macOS
 .DS_Store
-/build
-/captures
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Java crash dumps
+hs_err_pid*
+replay_pid*
+
+# Android leftovers (in case they reappear)
+captures/
 .externalNativeBuild
 .cxx
-local.properties
+*.apk
+*.ap_
+*.aab
