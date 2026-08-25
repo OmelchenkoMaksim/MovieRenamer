@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -211,5 +212,24 @@ class MovieRenamerTest {
         )
         assertEquals("The Matrix", hit?.title)
         assertEquals(1999, hit?.year)
+    }
+
+    @Test
+    fun `debug results path is only debug slash results`() {
+        assertTrue(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/results")))
+        assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/samples")))
+        assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/movies")))
+    }
+
+    @Test
+    fun `prepareResultsDirectory refuses to clean a random folder`() {
+        val random = Files.createTempDirectory("not-debug-results")
+        try {
+            assertFailsWith<IllegalStateException> {
+                FileGuard.prepareResultsDirectory(random)
+            }
+        } finally {
+            Files.deleteIfExists(random)
+        }
     }
 }

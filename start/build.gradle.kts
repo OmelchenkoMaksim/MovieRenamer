@@ -29,6 +29,7 @@ dependencies {
 
 tasks.withType<JavaExec>().configureEach {
     jvmArgs(utf8JvmArgs)
+    workingDir = rootProject.projectDir
 }
 
 tasks.named<CreateStartScripts>("startScripts") {

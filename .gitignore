@@ -23,6 +23,9 @@ local.properties
 # Local library used for scanning (not source)
 /movies/
 
+# DEBUG writes generated copies here; samples stay in git
+/debug/results/
+
 # macOS
 .DS_Store
 .AppleDouble

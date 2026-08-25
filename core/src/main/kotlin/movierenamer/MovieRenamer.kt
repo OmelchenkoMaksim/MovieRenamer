@@ -27,6 +27,7 @@ import java.text.Normalizer
 import java.time.Duration
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.extension
 import kotlin.io.path.isDirectory
 import kotlin.io.path.nameWithoutExtension
@@ -46,22 +47,49 @@ object MovieRenamer {
     fun run(settings: LaunchSettings) {
         // 0000.01 Иначе кириллица в консоли Windows поедет.
         Talk.install()
+        TitleCatalog.resetStats()
 
         val moviesDirectory = settings.moviesDirectory.toAbsolutePath().normalize()
+        val resultsDirectory = settings.resultsDirectory?.toAbsolutePath()?.normalize()
 
         Talk.info("Запуск Movie Renamer")
         Talk.info("Режим: ${settings.mode.displayName}")
         Talk.info("Рабочая директория: $moviesDirectory")
+        if (settings.mode == WorkMode.DEBUG) {
+            Talk.info("Исходники debug не трогаем. Результат: ${resultsDirectory ?: "не задан"}")
+        }
         if (settings.lookupOnline) {
             Talk.info("Онлайн-поиск: iTunes, TVMaze, Wikipedia")
         }
 
         if (!moviesDirectory.isDirectory()) {
             Talk.error("Директория не найдена: $moviesDirectory")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = moviesDirectory,
+                    filesRead = 0,
+                    apiRequests = 0,
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory,
+            )
             return
         }
 
-        // 0000.03 Обход только читает. FileGuard не даёт выйти за корень библиотеки.
+        if (settings.mode == WorkMode.DEBUG) {
+            val results = resultsDirectory
+            if (results == null) {
+                Talk.error("Для DEBUG нужна папка debug/results")
+                return
+            }
+            FileGuard.prepareResultsDirectory(results)
+        }
+
         val videoFiles = try {
             VideoScanner.findVideoFiles(moviesDirectory)
         } catch (exception: Exception) {
@@ -71,49 +99,85 @@ object MovieRenamer {
 
         if (videoFiles.isEmpty()) {
             Talk.info("В директории нет поддерживаемых видеофайлов")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = moviesDirectory,
+                    filesRead = 0,
+                    apiRequests = TitleCatalog.requestCount(),
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory,
+            )
             return
         }
 
         Talk.info("Найдено файлов: ${videoFiles.size}")
         println()
 
-        // 0000.04 Сначала план на все файлы, потом действие. Так не столкнёмся именами.
         val plans = RenamePlanner.planAll(moviesDirectory, videoFiles, settings.lookupOnline)
-        var applied = 0
-        var skipped = 0
-        var failed = 0
+        val errors = mutableListOf<FileIssue>()
+        var changed = 0
+        var writtenResults = 0
 
         plans.forEachIndexed { index, plan ->
             MediaPrinter.print(index, plan, settings.mode)
 
-            if (!plan.status.canApply) {
-                skipped++
-                return@forEachIndexed
-            }
-
             when (settings.mode) {
-                WorkMode.PREVIEW, WorkMode.DEBUG -> skipped++
+                WorkMode.PREVIEW -> Unit
+                WorkMode.DEBUG -> {
+                    val results = resultsDirectory ?: return@forEachIndexed
+                    if (plan.status == PlanStatus.READY || plan.status == PlanStatus.ALREADY_OK) {
+                        try {
+                            FileGuard.copyToResults(
+                                sourceLibrary = moviesDirectory,
+                                from = plan.file,
+                                resultsDirectory = results,
+                                newName = plan.proposedName,
+                            )
+                            writtenResults++
+                        } catch (exception: Exception) {
+                            val message = exception.message ?: "неизвестная ошибка"
+                            Talk.error("Не удалось записать результат ${plan.file.fileName}: $message")
+                            errors += FileIssue(plan.file, message)
+                        }
+                    }
+                }
                 WorkMode.RENAME, WorkMode.COPY -> {
+                    if (!plan.status.canApply) {
+                        return@forEachIndexed
+                    }
                     try {
                         applyPlan(settings.mode, moviesDirectory, plan)
-                        applied++
+                        changed++
                     } catch (exception: Exception) {
-                        Talk.error("Не удалось обработать ${plan.file.fileName}: ${exception.message}")
-                        failed++
+                        val message = exception.message ?: "неизвестная ошибка"
+                        Talk.error("Не удалось обработать ${plan.file.fileName}: $message")
+                        errors += FileIssue(plan.file, message)
                     }
                 }
             }
         }
 
-        println()
-        Talk.info("Готово")
-        Talk.info("Можно сделать: ${plans.count { it.status.canApply }}")
-        Talk.info("Не получится / не нужно: ${plans.count { !it.status.canApply }}")
-        if (settings.mode.isReadOnly) {
-            Talk.info("Файлы не изменялись")
-        } else {
-            Talk.info("Сделано: $applied, пропущено: $skipped, ошибок: $failed")
-        }
+        printReport(
+            RunReport(
+                mode = settings.mode,
+                directory = moviesDirectory,
+                filesRead = videoFiles.size,
+                apiRequests = TitleCatalog.requestCount(),
+                parsed = plans.count { it.status != PlanStatus.UNCLEAR },
+                unclear = plans.count { it.status == PlanStatus.UNCLEAR },
+                changed = changed,
+                writtenResults = writtenResults,
+                errors = errors,
+                unclearFiles = plans.filter { it.status == PlanStatus.UNCLEAR }.map { it.file },
+            ),
+            resultsDirectory,
+        )
     }
 
     private fun applyPlan(mode: WorkMode, library: Path, plan: RenamePlan) {
@@ -122,6 +186,14 @@ object MovieRenamer {
             WorkMode.RENAME -> FileGuard.rename(library, plan.file, target)
             WorkMode.COPY -> FileGuard.copy(library, plan.file, target)
             WorkMode.PREVIEW, WorkMode.DEBUG -> Unit
+        }
+    }
+
+    private fun printReport(report: RunReport, resultsDirectory: Path?) {
+        println()
+        ReportPrinter.print(report)
+        if (report.mode == WorkMode.DEBUG && resultsDirectory != null) {
+            ReportPrinter.writeFile(resultsDirectory.resolve("summary.txt"), report)
         }
     }
 }
@@ -148,13 +220,32 @@ enum class WorkMode(val displayName: String, val isReadOnly: Boolean) {
     PREVIEW("просмотр: что можно сделать", true),
     RENAME("переименовать на месте", false),
     COPY("копия с новым именем, оригинал оставить", false),
-    DEBUG("отладка разбора, файлы не трогаем", true),
+    DEBUG("тренировка: samples читаем, results пишем", true),
 }
 
 data class LaunchSettings(
     val moviesDirectory: Path,
     val mode: WorkMode,
     val lookupOnline: Boolean,
+    val resultsDirectory: Path? = null,
+)
+
+data class FileIssue(
+    val file: Path,
+    val message: String,
+)
+
+data class RunReport(
+    val mode: WorkMode,
+    val directory: Path,
+    val filesRead: Int,
+    val apiRequests: Int,
+    val parsed: Int,
+    val unclear: Int,
+    val changed: Int,
+    val writtenResults: Int,
+    val errors: List<FileIssue>,
+    val unclearFiles: List<Path> = emptyList(),
 )
 
 enum class PlanStatus(val canApply: Boolean, val displayName: String) {
@@ -392,6 +483,55 @@ object FileGuard {
 
     fun copy(library: Path, from: Path, to: Path) {
         val (source, target) = prepareMutation(library, from, to)
+        Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS)
+    }
+
+    fun isDebugResultsPath(directory: Path): Boolean {
+        val root = directory.toAbsolutePath().normalize()
+        return root.fileName.toString() == "results" &&
+            root.parent?.fileName?.toString() == "debug"
+    }
+
+    // 0100.02.01 Только debug/results. Исходники samples не чистим и не пишем.
+    fun prepareResultsDirectory(directory: Path) {
+        val root = directory.toAbsolutePath().normalize()
+        check(isDebugResultsPath(root)) {
+            "Результаты DEBUG пишем только в debug/results, а не в $root"
+        }
+        Files.createDirectories(root)
+        Files.list(root).use { stream ->
+            stream.forEach { path ->
+                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.delete(path)
+                }
+            }
+        }
+    }
+
+    fun copyToResults(
+        sourceLibrary: Path,
+        from: Path,
+        resultsDirectory: Path,
+        newName: String,
+    ) {
+        val destRoot = resultsDirectory.toAbsolutePath().normalize()
+        check(isDebugResultsPath(destRoot)) {
+            "Копии DEBUG только в debug/results"
+        }
+        val source = from.toAbsolutePath().normalize()
+        check(isInside(sourceLibrary, source)) {
+            "Читаем только файлы из samples/библиотеки: $source"
+        }
+        val target = destRoot.resolve(newName).normalize()
+        check(isInside(destRoot, target)) {
+            "Не выходим из debug/results"
+        }
+        check(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
+            "Источник не обычный файл: $source"
+        }
+        check(!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            "Не перезаписываем существующий результат: $target"
+        }
         Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS)
     }
 
@@ -772,6 +912,35 @@ object MediaPrinter {
     }
 }
 
+object ReportPrinter {
+    fun print(report: RunReport) {
+        lines(report).forEach(Talk::info)
+    }
+
+    fun writeFile(path: Path, report: RunReport) {
+        Files.writeString(path, lines(report).joinToString("\n") + "\n", StandardCharsets.UTF_8)
+    }
+
+    private fun lines(report: RunReport): List<String> {
+        return buildList {
+            add("—— Итог ——")
+            add("Режим: ${report.mode.displayName}")
+            add("Прочитали каталог: ${report.directory}")
+            add("Файлов прочитано: ${report.filesRead}")
+            add("Запросов к API: ${report.apiRequests}")
+            add("Удалось разобрать: ${report.parsed}")
+            add("Не разобрали: ${report.unclear}")
+            report.unclearFiles.forEach { add("  не разобрали: ${it.fileName}") }
+            add("Файлов изменено в библиотеке: ${report.changed}")
+            if (report.mode == WorkMode.DEBUG) {
+                add("Записано в debug/results: ${report.writtenResults}")
+            }
+            add("Ошибок: ${report.errors.size}")
+            report.errors.forEach { add("  ошибка: ${it.file.fileName} — ${it.message}") }
+        }
+    }
+}
+
 private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
     if (hit == null) return this
     return copy(
@@ -787,10 +956,18 @@ private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
 object TitleCatalog {
     private val json = Json { ignoreUnknownKeys = true }
     private val cache = mutableMapOf<String, CatalogHit?>()
+    private val httpRequests = AtomicInteger(0)
     private val http: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(8))
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
+
+    fun resetStats() {
+        httpRequests.set(0)
+        cache.clear()
+    }
+
+    fun requestCount(): Int = httpRequests.get()
 
     fun find(media: MediaInfo): CatalogHit? {
         if (media.title.isBlank() || media.title == "Название не определено") {
@@ -937,6 +1114,7 @@ object TitleCatalog {
     }
 
     private fun get(url: String): String? {
+        httpRequests.incrementAndGet()
         return runCatching {
             Thread.sleep(120)
             val request = HttpRequest.newBuilder(URI.create(url))
