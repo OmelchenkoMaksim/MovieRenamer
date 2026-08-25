@@ -13,3 +13,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "MovieRenamer"
+
+include("start")
+include("core")
