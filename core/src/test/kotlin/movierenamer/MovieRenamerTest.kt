@@ -1,5 +1,6 @@
 package movierenamer
 
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.text.Normalizer
@@ -216,7 +217,8 @@ class MovieRenamerTest {
 
     @Test
     fun `debug results path is only debug slash results`() {
-        assertTrue(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/results")))
+        assertTrue(FileGuard.isDebugResultsPath(Config.debugResults))
+        assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/results")))
         assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/samples")))
         assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/movies")))
     }
@@ -234,6 +236,37 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `file guard refuses a source behind a parent symlink`() {
+        val library = Files.createTempDirectory("library-")
+        val outside = Files.createTempDirectory("outside-")
+        val outsideVideo = outside.resolve("old.mkv")
+        val link = library.resolve("link")
+        Files.writeString(outsideVideo, "media")
+        try {
+            try {
+                Files.createSymbolicLink(link, outside)
+            } catch (_: UnsupportedOperationException) {
+                return
+            } catch (_: IOException) {
+                return
+            }
+
+            val linkedSource = link.resolve("old.mkv")
+            val linkedTarget = link.resolve("new.mkv")
+            assertFalse(FileGuard.isInside(library, linkedSource))
+            assertFailsWith<IllegalStateException> {
+                FileGuard.copy(library, linkedSource, linkedTarget)
+            }
+            assertFalse(Files.exists(outside.resolve("new.mkv")))
+        } finally {
+            Files.deleteIfExists(link)
+            Files.deleteIfExists(outsideVideo)
+            Files.deleteIfExists(outside)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
     fun `keeps a year that belongs to the title and uses the later release year`() {
         val odyssey = MediaParser.parse(Path.of("2001.A.Space.Odyssey.1968.1080p.mkv"))
         assertEquals("2001 A Space Odyssey", odyssey.title)
@@ -244,6 +277,39 @@ class MovieRenamerTest {
         assertEquals("Blade Runner 2049", blade.title)
         assertEquals(2017, blade.year)
         assertEquals("UHD", blade.resolution)
+    }
+
+    @Test
+    fun `parses the earliest supported cinema years`() {
+        val media = MediaParser.parse(Path.of("Workers.Leaving.the.Lumiere.Factory.1895.mkv"))
+
+        assertEquals("Workers Leaving the Lumiere Factory", media.title)
+        assertEquals(1895, media.year)
+    }
+
+    @Test
+    fun `does not treat language words inside a title as release tags`() {
+        val patient = MediaParser.parse(Path.of("The.English.Patient.1996.1080p.mkv"))
+        assertEquals("The English Patient", patient.title)
+        assertEquals(1996, patient.year)
+        assertTrue(patient.languages.isEmpty())
+
+        val doll = MediaParser.parse(
+            Path.of("Russian Doll", "Russian.Doll.2019.S01E01.1080p.WEB-DL.mkv"),
+        )
+        assertEquals("Russian Doll", doll.title)
+        assertTrue(doll.languages.isEmpty())
+    }
+
+    @Test
+    fun `takes a series title above a season folder`() {
+        val media = MediaParser.parse(
+            Path.of("Breaking Bad", "Season 2", "Breaking.Bad.S02E03.720p.WEB-DL.mkv"),
+        )
+
+        assertEquals("Breaking Bad", media.title)
+        assertEquals(2, media.season)
+        assertEquals(3, media.episode)
     }
 
     @Test
@@ -305,5 +371,40 @@ class MovieRenamerTest {
         assertEquals("The Matrix", TitleCatalog.cleanTitle("The Matrix (1999 film)"))
         assertEquals("Матрица", TitleCatalog.cleanTitle("Матрица (фильм)"))
         assertEquals("Дюна", TitleCatalog.cleanTitle("Дюна (фильм, 2021)"))
+        assertEquals("Игра престолов", TitleCatalog.cleanTitle("Игра престолов (телесериал)"))
+    }
+
+    @Test
+    fun `catalog requires an exact title before supplying a missing year`() {
+        val local = MediaParser.parse(Path.of("Dune.1080p.mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit("Wikipedia", "Dune Part Two", 2024, null),
+                CatalogHit("Wikipedia", "Dune", 2021, null),
+            ),
+        )
+
+        assertEquals("Dune", hit?.title)
+        assertEquals(2021, hit?.year)
+    }
+
+    @Test
+    fun `catalog rejects substring matches and a wrong sequel`() {
+        val it = MediaParser.parse(Path.of("It.2017.mkv"))
+        assertNull(
+            TitleCatalog.pickBest(
+                it,
+                listOf(CatalogHit("Wikipedia", "Titanic", 2017, null)),
+            ),
+        )
+
+        val trees = MediaParser.parse(Path.of("Ёлки.2010.mkv"))
+        assertNull(
+            TitleCatalog.pickBest(
+                trees,
+                listOf(CatalogHit("Wikipedia", "Ёлки 10", null, null)),
+            ),
+        )
     }
 }

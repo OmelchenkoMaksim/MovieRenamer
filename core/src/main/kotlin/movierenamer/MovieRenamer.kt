@@ -141,7 +141,7 @@ object MovieRenamer {
                 WorkMode.PREVIEW -> Unit
                 WorkMode.DEBUG -> {
                     val results = resultsDirectory ?: return@forEachIndexed
-                    if (plan.status == PlanStatus.READY || plan.status == PlanStatus.ALREADY_OK) {
+                    if (plan.status == PlanStatus.READY) {
                         try {
                             FileGuard.copyToResults(
                                 sourceLibrary = moviesDirectory,
@@ -417,6 +417,7 @@ private class WindowsConsoleOutputStream(
     private val decoder: CharsetDecoder = StandardCharsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPLACE)
         .onUnmappableCharacter(CodingErrorAction.REPLACE)
+    private var pendingBytes = ByteArray(0)
 
     @Synchronized
     override fun write(b: Int) {
@@ -426,8 +427,14 @@ private class WindowsConsoleOutputStream(
     @Synchronized
     override fun write(b: ByteArray, off: Int, len: Int) {
         if (len <= 0) return
-        val input = ByteBuffer.wrap(b, off, len)
-        val output = CharBuffer.allocate(len + 1)
+        val bytes = if (pendingBytes.isEmpty()) {
+            b.copyOfRange(off, off + len)
+        } else {
+            pendingBytes + b.copyOfRange(off, off + len)
+        }
+        pendingBytes = ByteArray(0)
+        val input = ByteBuffer.wrap(bytes)
+        val output = CharBuffer.allocate(bytes.size + 1)
         while (input.hasRemaining()) {
             val result = decoder.decode(input, output, false)
             output.flip()
@@ -436,7 +443,13 @@ private class WindowsConsoleOutputStream(
             }
             output.clear()
             when {
-                result.isUnderflow -> break
+                result.isUnderflow -> {
+                    if (input.hasRemaining()) {
+                        pendingBytes = ByteArray(input.remaining())
+                        input.get(pendingBytes)
+                    }
+                    break
+                }
                 result.isOverflow -> continue
                 result.isError -> result.throwException()
             }
@@ -449,7 +462,10 @@ private class WindowsConsoleOutputStream(
         var offset = 0
         val written = IntByReference()
         while (offset < chars.size) {
-            val chunk = minOf(4096, chars.size - offset)
+            var chunk = minOf(4096, chars.size - offset)
+            if (offset + chunk < chars.size && chars[offset + chunk - 1].isHighSurrogate()) {
+                chunk--
+            }
             val slice = if (offset == 0 && chunk == chars.size) {
                 chars
             } else {
@@ -458,7 +474,11 @@ private class WindowsConsoleOutputStream(
             if (!kernel32.WriteConsoleW(handle, slice, chunk, written, null)) {
                 throw IOException("WriteConsoleW failed while printing Unicode text")
             }
-            offset += chunk
+            val count = written.value
+            if (count <= 0 || count > chunk) {
+                throw IOException("WriteConsoleW returned an invalid character count: $count")
+            }
+            offset += count
         }
     }
 }
@@ -476,7 +496,11 @@ object FileGuard {
     fun isInside(library: Path, path: Path): Boolean {
         val root = libraryRoot(library)
         val candidate = path.toAbsolutePath().normalize()
-        return candidate.startsWith(root)
+        if (!candidate.startsWith(root)) return false
+        val parent = candidate.parent ?: return false
+        return runCatching {
+            parent.toRealPath().startsWith(root.toRealPath())
+        }.getOrDefault(false)
     }
 
     fun listRegularFiles(library: Path): List<Path> {
@@ -501,17 +525,17 @@ object FileGuard {
 
     fun isDebugResultsPath(directory: Path): Boolean {
         val root = directory.toAbsolutePath().normalize()
-        return root.fileName.toString() == "results" &&
-            root.parent?.fileName?.toString() == "debug"
+        return root == Config.debugResults.toAbsolutePath().normalize()
     }
 
     // 0100.02.01 Только debug/results. Исходники samples не чистим и не пишем.
     fun prepareResultsDirectory(directory: Path) {
         val root = directory.toAbsolutePath().normalize()
-        check(isDebugResultsPath(root)) {
-            "Результаты DEBUG пишем только в debug/results, а не в $root"
-        }
+        checkDebugResultsDirectory(root)
         Files.createDirectories(root)
+        check(!Files.isSymbolicLink(root) && isInside(Path.of("").toAbsolutePath(), root)) {
+            "debug/results не должен быть симлинком или вести за пределы проекта: $root"
+        }
         Files.list(root).use { stream ->
             stream.forEach { path ->
                 if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
@@ -528,8 +552,9 @@ object FileGuard {
         newName: String,
     ) {
         val destRoot = resultsDirectory.toAbsolutePath().normalize()
-        check(isDebugResultsPath(destRoot)) {
-            "Копии DEBUG только в debug/results"
+        checkDebugResultsDirectory(destRoot)
+        check(Files.isDirectory(destRoot, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(destRoot)) {
+            "Папка DEBUG results не готова или является симлинком: $destRoot"
         }
         val source = from.toAbsolutePath().normalize()
         check(isInside(sourceLibrary, source)) {
@@ -546,6 +571,23 @@ object FileGuard {
             "Не перезаписываем существующий результат: $target"
         }
         Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS)
+    }
+
+    private fun checkDebugResultsDirectory(directory: Path) {
+        check(isDebugResultsPath(directory)) {
+            "Результаты DEBUG пишем только в ${Config.debugResults.toAbsolutePath().normalize()}, а не в $directory"
+        }
+        val projectRoot = Path.of("").toAbsolutePath().normalize()
+        val parent = directory.parent
+        check(parent != null && Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
+            "Родительская папка DEBUG не найдена: $parent"
+        }
+        check(!Files.isSymbolicLink(parent) && isInside(projectRoot, directory)) {
+            "debug/results не должен вести за пределы проекта: $directory"
+        }
+        check(!Files.isSymbolicLink(directory)) {
+            "debug/results не должен быть симлинком: $directory"
+        }
     }
 
     // 0100.02 Единственные мутации: move или copy. Delete нет и не будет.
@@ -589,7 +631,7 @@ object MediaParser {
     private const val ASCII_START = """(?<![A-Za-z0-9])"""
     private const val ASCII_END = """(?![A-Za-z0-9])"""
 
-    private val yearRegex = Regex("""$ASCII_START(19\d{2}|20\d{2})$ASCII_END""")
+    private val yearRegex = Regex("""$ASCII_START(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})$ASCII_END""")
     private val seasonEpisodeRegex = Regex("""${ASCII_START}S(\d{1,2})E(\d{1,3})$ASCII_END""", asciiFlags)
     private val seasonRegex = Regex("""${ASCII_START}S\d{1,2}$ASCII_END""", asciiFlags)
     private val resolutionRegex = Regex(
@@ -608,13 +650,16 @@ object MediaParser {
         """^(?:www )?[\p{L}\p{N}-]+ (?:org|com|net|ru|info|tv|me|cc|biz) """,
         asciiFlags,
     )
-    private val wrappedYearRegex = Regex("""[(\[]\s*(19\d{2}|20\d{2})\s*[)\]]""")
+    private val wrappedYearRegex = Regex(
+        """[(\[]\s*(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})\s*[)\]]""",
+    )
     private val genericFolderNames = setOf(
         "samples", "sample", "movies", "movie", "video", "videos",
         "tv", "series", "shows", "downloads", "download", "media",
         "library", "debug", "temp", "tmp", "files",
         "фильмы", "сериалы", "видео", "загрузки",
     )
+    private val seasonFolderRegex = Regex("""(?iu)^(?:(?:season|сезон)\s*\d{1,3}|S\d{1,2})$""")
     private val editionRegex = Regex(
         """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED)$ASCII_END""",
         asciiFlags,
@@ -633,20 +678,27 @@ object MediaParser {
         // 0100.03.01 [1080p] в начале часто выкидывают до поиска тегов — запоминаем.
         val leadingResolution = leadingResolutionRegex.find(originalName)?.groupValues?.getOrNull(1)
         val fileName = normalizeReleaseName(originalName)
-        val parentName = normalizeReleaseName(path.parent?.fileName?.toString().orEmpty())
+        val immediateParent = path.parent
+        val parentName = normalizeReleaseName(immediateParent?.fileName?.toString().orEmpty())
+        val seriesParentName = if (seasonFolderRegex.matches(parentName)) {
+            normalizeReleaseName(immediateParent?.parent?.fileName?.toString().orEmpty())
+        } else {
+            parentName
+        }
         val seasonEpisodeMatch = seasonEpisodeRegex.find(fileName)
         val isTvEpisode = seasonEpisodeMatch != null
         // 0100.03.02 У серии год/качество иногда только в папке сериала.
-        val metadataText = if (isTvEpisode) "$fileName $parentName" else fileName
+        val metadataText = if (isTvEpisode) "$fileName $parentName $seriesParentName" else fileName
 
         return MediaInfo(
             mediaType = if (isTvEpisode) MediaType.TV_EPISODE else MediaType.MOVIE,
             title = if (isTvEpisode) {
-                extractSeriesTitle(fileName, parentName)
+                extractSeriesTitle(fileName, seriesParentName)
             } else {
                 extractMovieTitle(fileName)
             },
-            year = extractReleaseYear(metadataText),
+            year = extractReleaseYear(fileName)
+                ?: if (isTvEpisode) extractReleaseYear(seriesParentName) else null,
             season = seasonEpisodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull(),
             episode = seasonEpisodeMatch?.groupValues?.getOrNull(2)?.toIntOrNull(),
             episodeTitle = seasonEpisodeMatch?.let { extractEpisodeTitle(fileName, it) },
@@ -657,7 +709,8 @@ object MediaParser {
                 .map { normalizeEdition(it.value) }
                 .distinct()
                 .toList(),
-            languages = languageRegex.findAll(metadataText)
+            // Язык берём только из имени файла: название родительской папки может быть Russian Doll.
+            languages = languageMatches(fileName)
                 .mapNotNull { it.groupValues.getOrNull(1)?.let(::normalizeLanguage) }
                 .distinct()
                 .toList(),
@@ -715,7 +768,6 @@ object MediaParser {
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
             editionRegex.find(value)?.range?.first,
-            languageRegex.find(value)?.range?.first,
         ).minOrNull() ?: value.length
     }
 
@@ -738,8 +790,17 @@ object MediaParser {
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
             editionRegex.find(value)?.range?.first,
-            languageRegex.find(value)?.range?.first,
         ).minOrNull() ?: value.length
+    }
+
+    private fun languageMatches(value: String): Sequence<MatchResult> {
+        val metadataStart = listOfNotNull(
+            firstPlausibleYear(value)?.range?.first,
+            resolutionRegex.find(value)?.range?.first,
+            sourceRegex.find(value)?.range?.first,
+            editionRegex.find(value)?.range?.first,
+        ).minOrNull() ?: return emptySequence()
+        return languageRegex.findAll(value).filter { it.range.first > metadataStart }
     }
 
     private fun firstPlausibleYear(value: String): MatchResult? = plausibleYears(value).firstOrNull()
@@ -1060,7 +1121,7 @@ object TitleCatalog {
     fun pickBest(local: MediaInfo, hits: List<CatalogHit>): CatalogHit? {
         return hits
             .map { it to score(local, it) }
-            .filter { it.second >= 20 }
+            .filter { it.second >= 45 }
             .maxByOrNull { it.second }
             ?.first
     }
@@ -1070,24 +1131,29 @@ object TitleCatalog {
         val b = foldTitle(hit.title)
         if (a.isBlank() || b.isBlank()) return -1
 
-        var points = 0
-        when {
-            a == b -> points += 50
-            b.contains(a) || a.contains(b) -> points += 30
-            else -> {
-                val words = a.split(" ").filter { it.length > 2 }
-                val matched = words.count { it in b }
-                if (matched == 0) return -1
-                points += matched * 8
-            }
+        val exactTitle = a == b
+        // Без локального года каталог может дополнить данные только при точном названии.
+        if (local.year == null && !exactTitle) return -1
+
+        var points = if (exactTitle) {
+            60
+        } else {
+            val localWords = a.split(" ").filter(String::isNotBlank).toSet()
+            val hitWords = b.split(" ").filter(String::isNotBlank).toSet()
+            if (localWords.size <= 1 || hitWords.isEmpty()) return -1
+            val matched = localWords.intersect(hitWords).size
+            val coverage = matched.toDouble() / localWords.size
+            val precision = matched.toDouble() / hitWords.size
+            if (coverage < 0.75 || precision < 0.6) return -1
+            (coverage * 30 + precision * 20).toInt()
         }
 
         if (local.year != null && hit.year != null) {
             val delta = kotlin.math.abs(local.year - hit.year)
             points += when {
                 delta == 0 -> 25
-                delta == 1 -> 10
-                else -> -20
+                delta == 1 -> 5
+                else -> -40
             }
         }
         return points
@@ -1167,7 +1233,7 @@ object TitleCatalog {
         return title
             .replace(
                 Regex(
-                    """(?iu)\s*\((?:[^)]*\b(?:film|movie|сериал|фильм|tv series|television series|miniseries)\b[^)]*)\)\s*$""",
+                    """(?iu)\s*\((?:[^)]*\b(?:film|movie|сериал|телесериал|мини-?сериал|фильм|tv series|television series|miniseries)\b[^)]*)\)\s*$""",
                 ),
                 "",
             )
@@ -1175,7 +1241,9 @@ object TitleCatalog {
     }
 
     private fun yearOf(value: String?): Int? {
-        return value?.let { Regex("""\b(19\d{2}|20\d{2})\b""").find(it)?.value?.toIntOrNull() }
+        return value?.let {
+            Regex("""\b(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})\b""").find(it)?.value?.toIntOrNull()
+        }
     }
 
     private fun JsonObject.str(key: String): String? {
