@@ -36,6 +36,7 @@ import kotlin.io.path.nameWithoutExtension
 import kotlin.streams.asSequence
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
@@ -43,6 +44,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 // =============================================================================
 // 0000  Старт: терминал → папка → скан → каталоги → разбор имени → печать
@@ -53,6 +55,11 @@ object MovieRenamer {
         // 0000.01 Иначе кириллица в консоли Windows поедет.
         Talk.install()
         TitleCatalog.resetStats()
+
+        if (settings.mode == WorkMode.REVERT) {
+            revertNames(settings)
+            return
+        }
 
         val debug = settings.mode == WorkMode.DEBUG
         val moviesDirectory = if (debug) {
@@ -148,12 +155,15 @@ object MovieRenamer {
         val errors = mutableListOf<FileIssue>()
         var changed = 0
         var writtenResults = 0
+        val previousNames = NameHistory.load().pairs
+        val remembered = linkedMapOf<String, String>()
+        var historyDirectory: Path? = null
 
         plans.forEachIndexed { index, plan ->
             MediaPrinter.print(index, plan, settings.mode)
 
             when (settings.mode) {
-                WorkMode.PREVIEW -> Unit
+                WorkMode.PREVIEW, WorkMode.REVERT -> Unit
                 WorkMode.DEBUG -> {
                     val results = resultsDirectory ?: return@forEachIndexed
                     if (plan.status == PlanStatus.READY) {
@@ -164,6 +174,13 @@ object MovieRenamer {
                                 resultsDirectory = results,
                                 newName = plan.proposedName,
                             )
+                            rememberRename(
+                                remembered,
+                                previousNames,
+                                currentRelative = plan.proposedName,
+                                previousName = plan.file.fileName.toString(),
+                            )
+                            historyDirectory = results
                             writtenResults++
                         } catch (exception: Exception) {
                             val message = exception.message ?: "неизвестная ошибка"
@@ -178,6 +195,16 @@ object MovieRenamer {
                     }
                     try {
                         applyPlan(settings.mode, moviesDirectory, plan)
+                        val target = plan.target
+                        if (target != null) {
+                            rememberRename(
+                                remembered,
+                                previousNames,
+                                currentRelative = NameHistory.relativeKey(moviesDirectory, target),
+                                previousName = plan.file.fileName.toString(),
+                            )
+                            historyDirectory = moviesDirectory
+                        }
                         changed++
                     } catch (exception: Exception) {
                         val message = exception.message ?: "неизвестная ошибка"
@@ -185,6 +212,12 @@ object MovieRenamer {
                         errors += FileIssue(plan.file, message)
                     }
                 }
+            }
+        }
+
+        historyDirectory?.let { directory ->
+            if (remembered.isNotEmpty()) {
+                NameHistory.save(directory, remembered)
             }
         }
 
@@ -210,8 +243,101 @@ object MovieRenamer {
         when (mode) {
             WorkMode.RENAME -> FileGuard.rename(library, plan.file, target)
             WorkMode.COPY -> FileGuard.copy(library, plan.file, target)
-            WorkMode.PREVIEW, WorkMode.DEBUG -> Unit
+            WorkMode.PREVIEW, WorkMode.DEBUG, WorkMode.REVERT -> Unit
         }
+    }
+
+    private fun revertNames(settings: LaunchSettings) {
+        Talk.info("Запуск Movie Renamer")
+        Talk.info("Режим: ${settings.mode.displayName}")
+        val snapshot = NameHistory.load()
+        val library = snapshot.directory?.toAbsolutePath()?.normalize()
+        if (library == null || snapshot.pairs.isEmpty()) {
+            Talk.info("Кэш прошлых имён пуст: откатывать нечего")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = settings.moviesDirectory.toAbsolutePath().normalize(),
+                    filesRead = 0,
+                    apiRequests = 0,
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory = null,
+            )
+            return
+        }
+
+        Talk.info("Рабочая директория: $library")
+        Talk.info("Пар в кэше: ${snapshot.pairs.size}")
+
+        if (!library.isDirectory()) {
+            Talk.error("Директория из кэша не найдена: $library")
+            return
+        }
+
+        val videoFiles = try {
+            VideoScanner.findVideoFiles(library)
+        } catch (exception: Exception) {
+            Talk.error("Ошибка сканирования: ${exception.message}")
+            return
+        }
+
+        Talk.info("Найдено файлов: ${videoFiles.size}")
+        println()
+
+        val plans = RevertPlanner.planAll(library, videoFiles, snapshot.pairs)
+        val errors = mutableListOf<FileIssue>()
+        var changed = 0
+        val leftover = snapshot.pairs.toMutableMap()
+
+        plans.forEachIndexed { index, plan ->
+            MediaPrinter.print(index, plan, settings.mode)
+            if (!plan.status.canApply) return@forEachIndexed
+            try {
+                FileGuard.rename(library, plan.file, plan.target ?: return@forEachIndexed)
+                leftover.remove(NameHistory.relativeKey(library, plan.file))
+                leftover.remove(plan.file.fileName.toString())
+                changed++
+            } catch (exception: Exception) {
+                val message = exception.message ?: "неизвестная ошибка"
+                Talk.error("Не удалось вернуть ${plan.file.fileName}: $message")
+                errors += FileIssue(plan.file, message)
+            }
+        }
+
+        if (leftover != snapshot.pairs) {
+            NameHistory.save(library, leftover)
+        }
+
+        printReport(
+            RunReport(
+                mode = settings.mode,
+                directory = library,
+                filesRead = videoFiles.size,
+                apiRequests = 0,
+                parsed = plans.count { it.status != PlanStatus.UNCLEAR },
+                unclear = plans.count { it.status == PlanStatus.UNCLEAR },
+                changed = changed,
+                writtenResults = 0,
+                errors = errors,
+                unclearFiles = plans.filter { it.status == PlanStatus.UNCLEAR }.map { it.file },
+            ),
+            resultsDirectory = null,
+        )
+    }
+
+    private fun rememberRename(
+        remembered: MutableMap<String, String>,
+        previous: Map<String, String>,
+        currentRelative: String,
+        previousName: String,
+    ) {
+        if (currentRelative.isBlank() || previousName.isBlank() || currentRelative == previousName) return
+        remembered[currentRelative] = previous[previousName] ?: previousName
     }
 
     private fun printReport(report: RunReport, resultsDirectory: Path?) {
@@ -241,6 +367,7 @@ object Config {
 
     val debugSamples: Path = Path.of("debug", "samples")
     val debugResults: Path = Path.of("debug", "results")
+    val revertCache: Path = Path.of("debug", "revert-cache.json")
 }
 
 // 0001.04 Режим задаётся в Main.kt.
@@ -249,6 +376,7 @@ enum class WorkMode(val displayName: String, val isReadOnly: Boolean) {
     RENAME("переименовать на месте", false),
     COPY("копия с новым именем, оригинал оставить", false),
     DEBUG("тренировка: samples читаем, results пишем", true),
+    REVERT("вернуть прошлые имена", false),
 }
 
 data class LaunchSettings(
@@ -1082,6 +1210,112 @@ object RenamePlanner {
         )
     }
 }
+
+object RevertPlanner {
+    fun planAll(library: Path, files: List<Path>, pairs: Map<String, String>): List<RenamePlan> {
+        val reserved = mutableSetOf<Path>()
+        return files.map { file ->
+            val plan = planOne(library, file, pairs, reserved)
+            plan.target?.let(reserved::add)
+            plan
+        }
+    }
+
+    private fun planOne(
+        library: Path,
+        file: Path,
+        pairs: Map<String, String>,
+        reserved: Set<Path>,
+    ): RenamePlan {
+        val parsed = MediaParser.parse(file)
+        val relative = NameHistory.relativeKey(library, file)
+        val originalName = pairs[relative] ?: pairs[file.fileName.toString()]
+        val reasons = mutableListOf<String>()
+        if (originalName.isNullOrBlank()) {
+            reasons += "нет пары в кэше"
+        }
+        val proposedName = originalName ?: file.fileName.toString()
+        val target = file.parent?.resolve(proposedName)
+        val status = when {
+            reasons.isNotEmpty() -> PlanStatus.UNCLEAR
+            proposedName == file.fileName.toString() -> PlanStatus.ALREADY_OK
+            target == null -> {
+                reasons += "нет папки у файла"
+                PlanStatus.BLOCKED
+            }
+            !FileGuard.isInside(library, target) -> {
+                reasons += "цель вне библиотеки"
+                PlanStatus.BLOCKED
+            }
+            Files.exists(target, LinkOption.NOFOLLOW_LINKS) || target in reserved -> {
+                reasons += "файл с таким именем уже есть"
+                PlanStatus.BLOCKED
+            }
+            else -> PlanStatus.READY
+        }
+        return RenamePlan(
+            file = file,
+            media = parsed,
+            proposedName = proposedName,
+            status = status,
+            reasons = reasons,
+        )
+    }
+}
+
+object NameHistory {
+    private val json = Json { prettyPrint = true }
+
+    fun relativeKey(root: Path, file: Path): String {
+        val base = root.toAbsolutePath().normalize()
+        val target = file.toAbsolutePath().normalize()
+        return base.relativize(target).toString().replace('\\', '/')
+    }
+
+    fun load(file: Path = Config.revertCache): RevertSnapshot {
+        if (!Files.isRegularFile(file)) return RevertSnapshot(directory = null, pairs = emptyMap())
+        return runCatching {
+            val root = json.parseToJsonElement(Files.readString(file, StandardCharsets.UTF_8)).jsonObject
+            val directory = root["directory"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf(String::isNotBlank)
+                ?.let(Path::of)
+            val pairs = root["pairs"]?.jsonObject
+                ?.mapNotNull { (key, value) ->
+                    val original = value.jsonPrimitive.contentOrNull?.trim().orEmpty()
+                    key.trim().takeIf { it.isNotEmpty() && original.isNotEmpty() }?.let { it to original }
+                }
+                ?.toMap()
+                .orEmpty()
+            RevertSnapshot(directory = directory, pairs = pairs)
+        }.getOrDefault(RevertSnapshot(directory = null, pairs = emptyMap()))
+    }
+
+    fun save(directory: Path, pairs: Map<String, String>, file: Path = Config.revertCache) {
+        val parent = file.toAbsolutePath().normalize().parent
+        if (parent != null) {
+            Files.createDirectories(parent)
+        }
+        val payload = buildJsonObject {
+            put("directory", directory.toAbsolutePath().normalize().toString())
+            put(
+                "pairs",
+                buildJsonObject {
+                    pairs.forEach { (current, original) ->
+                        if (current.isNotBlank() && original.isNotBlank()) {
+                            put(current, original)
+                        }
+                    }
+                },
+            )
+        }
+        Files.writeString(file, payload.toString() + "\n", StandardCharsets.UTF_8)
+    }
+}
+
+data class RevertSnapshot(
+    val directory: Path?,
+    val pairs: Map<String, String>,
+)
 
 object MediaPrinter {
     fun print(index: Int, plan: RenamePlan, mode: WorkMode) {

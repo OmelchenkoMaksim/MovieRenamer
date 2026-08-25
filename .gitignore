@@ -19,12 +19,14 @@ out/
 # Local machine / secrets
 local.properties
 *.log
+/start/src/main/kotlin/movierenamer/catalog-tokens.properties
 
 # Local library used for scanning (not source)
 /movies/
 
 # DEBUG writes generated copies here; samples stay in git
 /debug/results/
+/debug/revert-cache.json
 
 # macOS
 .DS_Store

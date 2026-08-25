@@ -21,6 +21,7 @@ private val workMode: WorkMode = WorkMode.DEBUG
 // WorkMode.RENAME  — библиотека movies: переименовать на месте
 // WorkMode.COPY    — библиотека movies: копия с новым именем
 // WorkMode.DEBUG   — только debug/samples и debug/results, movies не трогаем
+// WorkMode.REVERT  — вернуть имена из кэша последнего переименования
 
 private val lookupOnline: Boolean = true
 

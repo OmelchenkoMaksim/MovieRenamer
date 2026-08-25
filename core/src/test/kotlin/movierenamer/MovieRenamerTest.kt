@@ -768,4 +768,74 @@ class MovieRenamerTest {
         assertEquals(8.5, chosen?.rating)
         assertEquals("КП", chosen?.ratingSource)
     }
+
+    @Test
+    fun `revert cache stores new name to original name pairs`() {
+        val cache = Files.createTempFile("revert-cache-", ".json")
+        val library = Files.createTempDirectory("library-")
+        try {
+            NameHistory.save(
+                library,
+                mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv"),
+                cache,
+            )
+            val loaded = NameHistory.load(cache)
+            assertEquals(library.toAbsolutePath().normalize(), loaded.directory?.toAbsolutePath()?.normalize())
+            assertEquals("The.Matrix.1999.mkv", loaded.pairs["The Matrix (1999) 1080p.mkv"])
+        } finally {
+            Files.deleteIfExists(cache)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `revert planner restores the original name when the cache has a pair`() {
+        val library = Files.createTempDirectory("library-")
+        val renamed = library.resolve("The Matrix (1999) 1080p.mkv")
+        Files.createFile(renamed)
+        try {
+            val plan = RevertPlanner.planAll(
+                library,
+                listOf(renamed),
+                mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv"),
+            ).single()
+
+            assertEquals(PlanStatus.READY, plan.status)
+            assertEquals("The.Matrix.1999.mkv", plan.proposedName)
+
+            FileGuard.rename(library, renamed, plan.target!!)
+            assertFalse(Files.exists(renamed))
+            assertTrue(Files.exists(library.resolve("The.Matrix.1999.mkv")))
+        } finally {
+            Files.deleteIfExists(renamed)
+            Files.deleteIfExists(library.resolve("The.Matrix.1999.mkv"))
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `revert planner leaves a file without a cache pair unclear`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("other.mkv")
+        Files.createFile(video)
+        try {
+            val plan = RevertPlanner.planAll(
+                library,
+                listOf(video),
+                mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv"),
+            ).single()
+            assertEquals(PlanStatus.UNCLEAR, plan.status)
+            assertTrue(plan.reasons.any { it.contains("кэше") })
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `chained rename keeps the very first original name`() {
+        val previous = mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv")
+        val original = previous["The Matrix (1999) 1080p.mkv"] ?: "The Matrix (1999) 1080p.mkv"
+        assertEquals("The.Matrix.1999.mkv", original)
+    }
 }
