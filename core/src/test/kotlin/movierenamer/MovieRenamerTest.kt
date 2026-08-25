@@ -232,4 +232,78 @@ class MovieRenamerTest {
             Files.deleteIfExists(random)
         }
     }
+
+    @Test
+    fun `keeps a year that belongs to the title and uses the later release year`() {
+        val odyssey = MediaParser.parse(Path.of("2001.A.Space.Odyssey.1968.1080p.mkv"))
+        assertEquals("2001 A Space Odyssey", odyssey.title)
+        assertEquals(1968, odyssey.year)
+        assertEquals("1080p", odyssey.resolution)
+
+        val blade = MediaParser.parse(Path.of("Blade.Runner.2049.2017.UHD.mkv"))
+        assertEquals("Blade Runner 2049", blade.title)
+        assertEquals(2017, blade.year)
+        assertEquals("UHD", blade.resolution)
+    }
+
+    @Test
+    fun `unwraps a year in parentheses and treats an already-clean name as already ok`() {
+        val media = MediaParser.parse(Path.of("The Matrix (1999) 1080p BluRay.mkv"))
+        assertEquals("The Matrix", media.title)
+        assertEquals(1999, media.year)
+        assertEquals(
+            "The Matrix (1999) 1080p BluRay.mkv",
+            NameFormatter.fileName(media, "mkv"),
+        )
+
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("The Matrix (1999) 1080p BluRay.mkv")
+        Files.createFile(video)
+        try {
+            val plan = RenamePlanner.planAll(library, listOf(video)).single()
+            assertEquals(PlanStatus.ALREADY_OK, plan.status)
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `ignores a generic parent folder for a tv episode`() {
+        val media = MediaParser.parse(
+            Path.of("samples", "IGRA.PRESTOLOV.S01E01.1080P.WEB-DL.mkv"),
+        )
+        assertEquals("IGRA PRESTOLOV", media.title)
+        assertEquals(1, media.season)
+        assertEquals(1, media.episode)
+        assertEquals("1080p", media.resolution)
+        assertEquals("WEB-DL", media.source)
+    }
+
+    @Test
+    fun `strips a tracker site prefix from the title`() {
+        val media = MediaParser.parse(
+            Path.of("www.Kinozal.Org.Interstellar.2014.1080p.WEB-DL.mkv"),
+        )
+        assertEquals("Interstellar", media.title)
+        assertEquals(2014, media.year)
+        assertEquals("1080p", media.resolution)
+        assertEquals("WEB-DL", media.source)
+    }
+
+    @Test
+    fun `detects WEB-DLRip as a source`() {
+        val media = MediaParser.parse(Path.of("Матрица.1999.WEB-DLRip.avi"))
+        assertEquals("Матрица", media.title)
+        assertEquals(1999, media.year)
+        assertEquals("WEB-DLRip", media.source)
+    }
+
+    @Test
+    fun `strips wikipedia film disambiguation from a catalog title`() {
+        assertEquals("Dune", TitleCatalog.cleanTitle("Dune (2021 film)"))
+        assertEquals("The Matrix", TitleCatalog.cleanTitle("The Matrix (1999 film)"))
+        assertEquals("Матрица", TitleCatalog.cleanTitle("Матрица (фильм)"))
+        assertEquals("Дюна", TitleCatalog.cleanTitle("Дюна (фильм, 2021)"))
+    }
 }

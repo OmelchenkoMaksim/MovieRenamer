@@ -26,6 +26,7 @@ import java.nio.file.StandardCopyOption
 import java.text.Normalizer
 import java.time.Duration
 import java.time.LocalTime
+import java.time.Year
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.extension
@@ -600,8 +601,19 @@ object MediaParser {
         asciiFlags,
     )
     private val sourceRegex = Regex(
-        """$ASCII_START(WEB[ .\-\p{Pd}]?DL|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV)$ASCII_END""",
+        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV)$ASCII_END""",
         asciiFlags,
+    )
+    private val sitePrefixRegex = Regex(
+        """^(?:www )?[\p{L}\p{N}-]+ (?:org|com|net|ru|info|tv|me|cc|biz) """,
+        asciiFlags,
+    )
+    private val wrappedYearRegex = Regex("""[(\[]\s*(19\d{2}|20\d{2})\s*[)\]]""")
+    private val genericFolderNames = setOf(
+        "samples", "sample", "movies", "movie", "video", "videos",
+        "tv", "series", "shows", "downloads", "download", "media",
+        "library", "debug", "temp", "tmp", "files",
+        "фильмы", "сериалы", "видео", "загрузки",
     )
     private val editionRegex = Regex(
         """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED)$ASCII_END""",
@@ -634,7 +646,7 @@ object MediaParser {
             } else {
                 extractMovieTitle(fileName)
             },
-            year = yearRegex.find(metadataText)?.value?.toIntOrNull(),
+            year = extractReleaseYear(metadataText),
             season = seasonEpisodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull(),
             episode = seasonEpisodeMatch?.groupValues?.getOrNull(2)?.toIntOrNull(),
             episodeTitle = seasonEpisodeMatch?.let { extractEpisodeTitle(fileName, it) },
@@ -652,27 +664,32 @@ object MediaParser {
         )
     }
 
-    // 0100.03.03 Название — всё до первого тега (год, SxxExx, 1080p, WEB-DL, …).
+    // 0100.03.03 Название фильма — всё до года релиза (последний год перед качеством).
     private fun extractMovieTitle(fileName: String): String {
         return fileName
-            .substring(0, findFirstMetadataIndex(fileName))
+            .substring(0, movieTitleEndIndex(fileName))
             .trimReleaseSeparators()
             .ifBlank { fileName }
     }
 
     private fun extractSeriesTitle(fileName: String, parentName: String): String {
+        val titleFromFile = fileName
+            .substring(0, findFirstMetadataIndex(fileName))
+            .trimReleaseSeparators()
         val titleFromParent = parentName
             .substring(0, findFirstMetadataIndex(parentName))
             .trimReleaseSeparators()
 
-        if (titleFromParent.isNotBlank()) {
+        // 0100.03.03.01 Папка samples/movies — не название сериала.
+        if (titleFromParent.isNotBlank() && !isGenericFolder(titleFromParent)) {
             return titleFromParent
         }
 
-        return fileName
-            .substring(0, findFirstMetadataIndex(fileName))
-            .trimReleaseSeparators()
-            .ifBlank { "Название не определено" }
+        return titleFromFile.ifBlank { "Название не определено" }
+    }
+
+    private fun isGenericFolder(name: String): Boolean {
+        return name.lowercase() in genericFolderNames
     }
 
     private fun extractEpisodeTitle(fileName: String, seasonEpisodeMatch: MatchResult): String? {
@@ -692,7 +709,7 @@ object MediaParser {
 
     private fun findFirstMetadataIndex(value: String): Int {
         return listOfNotNull(
-            yearRegex.find(value)?.range?.first,
+            firstPlausibleYear(value)?.range?.first,
             seasonEpisodeRegex.find(value)?.range?.first,
             seasonRegex.find(value)?.range?.first,
             resolutionRegex.find(value)?.range?.first,
@@ -700,6 +717,43 @@ object MediaParser {
             editionRegex.find(value)?.range?.first,
             languageRegex.find(value)?.range?.first,
         ).minOrNull() ?: value.length
+    }
+
+    // 0100.03.05 Год релиза — последний 1888…сейчас+1 до тегов качества: 2001 и 2049 остаются в названии.
+    private fun movieTitleEndIndex(fileName: String): Int {
+        val qualityIndex = firstQualityIndex(fileName)
+        val lastYear = lastPlausibleYear(fileName.substring(0, qualityIndex))
+        return lastYear?.range?.first ?: qualityIndex
+    }
+
+    private fun extractReleaseYear(text: String): Int? {
+        val qualityIndex = firstQualityIndex(text)
+        return lastPlausibleYear(text.substring(0, qualityIndex))?.value?.toInt()
+    }
+
+    private fun firstQualityIndex(value: String): Int {
+        return listOfNotNull(
+            seasonEpisodeRegex.find(value)?.range?.first,
+            seasonRegex.find(value)?.range?.first,
+            resolutionRegex.find(value)?.range?.first,
+            sourceRegex.find(value)?.range?.first,
+            editionRegex.find(value)?.range?.first,
+            languageRegex.find(value)?.range?.first,
+        ).minOrNull() ?: value.length
+    }
+
+    private fun firstPlausibleYear(value: String): MatchResult? = plausibleYears(value).firstOrNull()
+
+    private fun lastPlausibleYear(value: String): MatchResult? = plausibleYears(value).lastOrNull()
+
+    private fun plausibleYears(value: String): List<MatchResult> {
+        val maxYear = Year.now().value + 1
+        return yearRegex.findAll(value)
+            .filter { match ->
+                val year = match.value.toInt()
+                year in 1888..maxYear
+            }
+            .toList()
     }
 
     // 0100.03.04 NFC + тире/точки/пробелы к одному виду, чтобы regex не путались.
@@ -711,6 +765,9 @@ object MediaParser {
             .replace('\uFF0E', ' ')
             .replace('_', ' ')
             .replace('\uFF3F', ' ')
+            .replace(wrappedYearRegex, "$1")
+            .replace(Regex("""[\p{Zs}\s]+"""), " ")
+            .replace(sitePrefixRegex, "")
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .trim()
     }
@@ -730,6 +787,7 @@ object MediaParser {
 
     private fun normalizeSource(value: String): String {
         return when (value.uppercase().replace(Regex("""[ .\-\p{Pd}]"""), "")) {
+            "WEBDLRIP" -> "WEB-DLRip"
             "WEBDL" -> "WEB-DL"
             "WEBRIP" -> "WEBRip"
             "BLURAY" -> "BluRay"
@@ -956,7 +1014,7 @@ object ReportPrinter {
 private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
     if (hit == null) return this
     return copy(
-        title = hit.title.ifBlank { title },
+        title = TitleCatalog.cleanTitle(hit.title).ifBlank { title },
         year = year ?: hit.year,
     )
 }
@@ -1057,7 +1115,7 @@ object TitleCatalog {
                     ?: return@mapNotNull null
                 CatalogHit(
                     site = "iTunes",
-                    title = title,
+                    title = cleanTitle(title),
                     year = yearOf(item.str("releaseDate")),
                     pageUrl = item.str("trackViewUrl") ?: item.str("collectionViewUrl"),
                 )
@@ -1074,7 +1132,7 @@ object TitleCatalog {
                 val title = show.str("name") ?: return@mapNotNull null
                 CatalogHit(
                     site = "TVMaze",
-                    title = title,
+                    title = cleanTitle(title),
                     year = yearOf(show.str("premiered")),
                     pageUrl = show.str("url"),
                 )
@@ -1096,7 +1154,7 @@ object TitleCatalog {
                 val description = descriptions.getOrNull(index)?.jsonPrimitive?.contentOrNull.orEmpty()
                 CatalogHit(
                     site = "Wikipedia ($lang)",
-                    title = stripWikiSuffix(rawTitle),
+                    title = cleanTitle(rawTitle),
                     year = yearOf(description) ?: yearOf(rawTitle),
                     pageUrl = urls.getOrNull(index)?.jsonPrimitive?.contentOrNull,
                 )
@@ -1104,10 +1162,13 @@ object TitleCatalog {
         }.getOrDefault(emptyList())
     }
 
-    private fun stripWikiSuffix(title: String): String {
+    // 1000.01 Wikipedia: «Dune (2021 film)» → «Dune», без второго года в имени файла.
+    fun cleanTitle(title: String): String {
         return title
             .replace(
-                Regex("""\s*\((film|movie|сериал|фильм|TV series|television series).*?\)$""", RegexOption.IGNORE_CASE),
+                Regex(
+                    """(?iu)\s*\((?:[^)]*\b(?:film|movie|сериал|фильм|tv series|television series|miniseries)\b[^)]*)\)\s*$""",
+                ),
                 "",
             )
             .trim()
