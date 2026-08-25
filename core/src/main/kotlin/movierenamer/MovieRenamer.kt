@@ -49,8 +49,17 @@ object MovieRenamer {
         Talk.install()
         TitleCatalog.resetStats()
 
-        val moviesDirectory = settings.moviesDirectory.toAbsolutePath().normalize()
-        val resultsDirectory = settings.resultsDirectory?.toAbsolutePath()?.normalize()
+        val debug = settings.mode == WorkMode.DEBUG
+        val moviesDirectory = if (debug) {
+            Config.debugSamples.toAbsolutePath().normalize()
+        } else {
+            settings.moviesDirectory.toAbsolutePath().normalize()
+        }
+        val resultsDirectory = if (debug) {
+            Config.debugResults.toAbsolutePath().normalize()
+        } else {
+            null
+        }
 
         Talk.info("Запуск Movie Renamer")
         Talk.info("Режим: ${settings.mode.displayName}")
@@ -213,6 +222,9 @@ object Config {
         "ts",
         "m2ts",
     )
+
+    val debugSamples: Path = Path.of("debug", "samples")
+    val debugResults: Path = Path.of("debug", "results")
 }
 
 // 0001.04 Режим задаётся в Main.kt.
