@@ -8,7 +8,7 @@ import java.nio.file.Path
 import kotlin.io.path.isDirectory
 
 fun main(args: Array<String>) {
-    Console.useUtf8()
+    Console.install()
 
     val moviesDirectory = resolveMoviesDirectory(args) ?: return
 

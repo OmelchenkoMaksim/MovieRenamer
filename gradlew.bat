@@ -25,6 +25,8 @@
 
 @rem Set local scope for the variables with windows NT shell
 if "%OS%"=="Windows_NT" setlocal
+@rem UTF-8 console so Gradle and the app can print Cyrillic correctly
+chcp 65001 >NUL
 
 set DIRNAME=%~dp0
 if "%DIRNAME%"=="" set DIRNAME=.

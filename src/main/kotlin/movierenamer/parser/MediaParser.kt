@@ -3,32 +3,45 @@ package movierenamer.parser
 import movierenamer.model.MediaInfo
 import movierenamer.model.MediaType
 import java.nio.file.Path
+import java.text.Normalizer
 import kotlin.io.path.nameWithoutExtension
 
 object MediaParser {
-    private val yearRegex = Regex("""\b(19\d{2}|20\d{2})\b""")
-    private val seasonEpisodeRegex = Regex("""\bS(\d{1,2})E(\d{1,3})\b""", RegexOption.IGNORE_CASE)
-    private val seasonRegex = Regex("""\bS\d{1,2}\b""", RegexOption.IGNORE_CASE)
-    private val resolutionRegex = Regex("""\b(480p|720p|1080p|2160p|4K|UHD)\b""", RegexOption.IGNORE_CASE)
+    private val asciiFlags = setOf(RegexOption.IGNORE_CASE)
+
+    private const val ASCII_START = """(?<![A-Za-z0-9])"""
+    private const val ASCII_END = """(?![A-Za-z0-9])"""
+
+    private val yearRegex = Regex("""$ASCII_START(19\d{2}|20\d{2})$ASCII_END""")
+    private val seasonEpisodeRegex = Regex("""${ASCII_START}S(\d{1,2})E(\d{1,3})$ASCII_END""", asciiFlags)
+    private val seasonRegex = Regex("""${ASCII_START}S\d{1,2}$ASCII_END""", asciiFlags)
+    private val resolutionRegex = Regex(
+        """$ASCII_START(480p|720p|1080p|2160p|4K|UHD)$ASCII_END""",
+        asciiFlags,
+    )
     private val leadingResolutionRegex = Regex(
-        """^\s*\[(480p|720p|1080p|2160p|4K|UHD)\]\s*""",
-        RegexOption.IGNORE_CASE,
+        """^[\p{Zs}\s]*\[(480p|720p|1080p|2160p|4K|UHD)\][\p{Zs}\s]*""",
+        asciiFlags,
     )
     private val sourceRegex = Regex(
-        """\b(WEB[ .-]?DL|WEB[ .-]?RIP|BLU[ .-]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV)\b""",
-        RegexOption.IGNORE_CASE,
+        """$ASCII_START(WEB[ .\-\p{Pd}]?DL|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV)$ASCII_END""",
+        asciiFlags,
     )
     private val editionRegex = Regex(
-        """\b(OPEN[ .-]?MATTE|UNRATED|EXTENDED(?:[ .-]?EDITION)?|DIRECTOR'?S[ .-]?CUT|THEATRICAL|REMASTERED)\b""",
-        RegexOption.IGNORE_CASE,
+        """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED)$ASCII_END""",
+        asciiFlags,
     )
     private val languageRegex = Regex(
-        """\b(?:\d+x)?(RUS|RUSSIAN|ENG|ENGLISH|UKR|UKRAINIAN|GER|FRE|JPN)\b""",
-        RegexOption.IGNORE_CASE,
+        """(?iu)(?<![\p{L}\p{N}])(?:\d+x)?(""" +
+            """RUSSIAN|ENGLISH|UKRAINIAN|""" +
+            """РУССКИЙ|АНГЛИЙСКИЙ|УКРАИНСКИЙ|""" +
+            """RUS|ENG|UKR|GER|FRE|JPN|""" +
+            """РУС|АНГЛ|УКР""" +
+            """)(?![\p{L}\p{N}])""",
     )
 
     fun parse(path: Path): MediaInfo {
-        val originalName = path.nameWithoutExtension
+        val originalName = normalizeUnicode(path.nameWithoutExtension)
         val leadingResolution = leadingResolutionRegex.find(originalName)?.groupValues?.getOrNull(1)
         val fileName = normalizeReleaseName(originalName)
         val parentName = normalizeReleaseName(path.parent?.fileName?.toString().orEmpty())
@@ -111,12 +124,20 @@ object MediaParser {
     }
 
     private fun normalizeReleaseName(value: String): String {
-        return value
+        return normalizeUnicode(value)
             .replace(leadingResolutionRegex, "")
-            .replace(".", " ")
-            .replace("_", " ")
-            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""\p{Pd}"""), "-")
+            .replace('.', ' ')
+            .replace('\uFF0E', ' ')
+            .replace('_', ' ')
+            .replace('\uFF3F', ' ')
+            .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .trim()
+    }
+
+    private fun normalizeUnicode(value: String): String {
+        return Normalizer.normalize(value, Normalizer.Form.NFC)
+            .replace(Regex("""[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF\u00AD]"""), "")
     }
 
     private fun normalizeResolution(value: String): String {
@@ -128,7 +149,7 @@ object MediaParser {
     }
 
     private fun normalizeSource(value: String): String {
-        return when (value.uppercase().replace(Regex("""[ .\-]"""), "")) {
+        return when (value.uppercase().replace(Regex("""[ .\-\p{Pd}]"""), "")) {
             "WEBDL" -> "WEB-DL"
             "WEBRIP" -> "WEBRip"
             "BLURAY" -> "BluRay"
@@ -142,7 +163,10 @@ object MediaParser {
     }
 
     private fun normalizeEdition(value: String): String {
-        val compact = value.uppercase().replace(".", " ").replace("-", " ").replace(Regex("""\s+"""), " ").trim()
+        val compact = value.uppercase()
+            .replace(Regex("""[.\-\p{Pd}]+"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
         return when {
             compact == "OPEN MATTE" -> "Open Matte"
             compact == "UNRATED" -> "Unrated"
@@ -156,9 +180,9 @@ object MediaParser {
 
     private fun normalizeLanguage(value: String): String? {
         return when (value.uppercase()) {
-            "RUS", "RUSSIAN" -> "RU"
-            "ENG", "ENGLISH" -> "EN"
-            "UKR", "UKRAINIAN" -> "UK"
+            "RUS", "RUSSIAN", "РУС", "РУССКИЙ" -> "RU"
+            "ENG", "ENGLISH", "АНГЛ", "АНГЛИЙСКИЙ" -> "EN"
+            "UKR", "UKRAINIAN", "УКР", "УКРАИНСКИЙ" -> "UK"
             "GER" -> "DE"
             "FRE" -> "FR"
             "JPN" -> "JA"
@@ -167,4 +191,12 @@ object MediaParser {
     }
 }
 
-private fun String.trimReleaseSeparators(): String = trim(' ', '-', '.', '_')
+private fun String.trimReleaseSeparators(): String {
+    return trim { char ->
+        char.isWhitespace() ||
+            char == '.' ||
+            char == '_' ||
+            char == '-' ||
+            Character.getType(char) == Character.DASH_PUNCTUATION.toInt()
+    }
+}

@@ -2,6 +2,7 @@ package movierenamer.parser
 
 import movierenamer.model.MediaType
 import java.nio.file.Path
+import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -49,5 +50,43 @@ class MediaParserTest {
         assertEquals(2021, media.year)
         assertEquals("1080p", media.resolution)
         assertEquals(listOf("Director's Cut", "Open Matte", "Remastered"), media.editions)
+    }
+
+    @Test
+    fun `parses a cyrillic movie name glued to year and language tags`() {
+        val media = MediaParser.parse(
+            Path.of("Дюна.2021.2160p.WEB-DL.РУС.ENG.mkv"),
+        )
+
+        assertEquals(MediaType.MOVIE, media.mediaType)
+        assertEquals("Дюна", media.title)
+        assertEquals(2021, media.year)
+        assertEquals("2160p", media.resolution)
+        assertEquals("WEB-DL", media.source)
+        assertEquals(listOf("RU", "EN"), media.languages)
+    }
+
+    @Test
+    fun `parses a cyrillic tv episode with unicode dashes`() {
+        val media = MediaParser.parse(
+            Path.of("Игра Престолов", "Игра.Престолов.S01E01.Зима.близко.1080p.WEB–DL.mkv"),
+        )
+
+        assertEquals(MediaType.TV_EPISODE, media.mediaType)
+        assertEquals("Игра Престолов", media.title)
+        assertEquals(1, media.season)
+        assertEquals(1, media.episode)
+        assertEquals("Зима близко", media.episodeTitle)
+        assertEquals("1080p", media.resolution)
+        assertEquals("WEB-DL", media.source)
+    }
+
+    @Test
+    fun `normalizes decomposed cyrillic letters to NFC`() {
+        val decomposed = Normalizer.normalize("Ёлки", Normalizer.Form.NFD)
+        val media = MediaParser.parse(Path.of("$decomposed.2010.1080p.mkv"))
+
+        assertEquals("Ёлки", media.title)
+        assertEquals(2010, media.year)
     }
 }
