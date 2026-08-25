@@ -1,5 +1,6 @@
 package movierenamer
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Properties
@@ -23,20 +24,18 @@ private val workMode: WorkMode = WorkMode.DEBUG
 
 private val lookupOnline: Boolean = true
 
-// Локальный токен лежит рядом с Main.kt и никогда не попадает в Git.
-// Скопируйте tmdb-token.example.properties в tmdb-token.local.properties
-// и замените моковое значение на TMDB API Read Access Token.
-private val tmdbTokenFile: Path = Path.of(
+// Оба токена лежат в одном файле рядом с Main.kt.
+private val catalogTokensFile: Path = Path.of(
     "start",
     "src",
     "main",
     "kotlin",
     "movierenamer",
-    "tmdb-token.local.properties",
+    "catalog-tokens.properties",
 )
 
 fun main() {
-    installLocalTmdbToken()
+    installCatalogTokens()
     MovieRenamer.run(
         LaunchSettings(
             moviesDirectory = moviesDirectory,
@@ -46,12 +45,17 @@ fun main() {
     )
 }
 
-private fun installLocalTmdbToken() {
-    if (!Files.isRegularFile(tmdbTokenFile)) return
+private fun installCatalogTokens() {
+    if (!Files.isRegularFile(catalogTokensFile)) return
     val properties = Properties()
-    Files.newInputStream(tmdbTokenFile).use(properties::load)
-    properties.getProperty("TMDB_API_TOKEN")
+    Files.newBufferedReader(catalogTokensFile, StandardCharsets.UTF_8).use(properties::load)
+    installToken(properties, "TMDB_API_TOKEN", "tmdb.api.token")
+    installToken(properties, "POISKKINO_API_TOKEN", "poiskkino.api.token")
+}
+
+private fun installToken(properties: Properties, propertyName: String, systemProperty: String) {
+    properties.getProperty(propertyName)
         ?.trim()
-        ?.takeIf { it.isNotEmpty() && it != "PASTE_TMDB_READ_ACCESS_TOKEN_HERE" }
-        ?.let { System.setProperty("tmdb.api.token", it) }
+        ?.takeIf { it.isNotEmpty() && it != "плейсхолдер" }
+        ?.let { System.setProperty(systemProperty, it) }
 }

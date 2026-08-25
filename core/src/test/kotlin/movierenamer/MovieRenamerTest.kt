@@ -417,11 +417,12 @@ class MovieRenamerTest {
             genres = listOf("Фантастика", "Приключения", "Драма"),
             actors = listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"),
             rating = 8.2,
+            ratingSource = "TMDB",
         )
 
         assertEquals(
             "Dune — Дюна (2021) [Фантастика, Приключения, Драма] " +
-                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] [TMDB 8.2] 2160p.mkv",
+                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
     }
@@ -435,10 +436,11 @@ class MovieRenamerTest {
             genres = listOf("Драма", "Криминал"),
             actors = listOf("Сергей Бодров мл.", "Виктор Сухоруков", "Светлана Письмиченко"),
             rating = 7.9,
+            ratingSource = "TMDB",
         )
         assertEquals(
             "Брат (1997) [Драма, Криминал] " +
-                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] [TMDB 7.9] 1080p.mkv",
+                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p.mkv",
             NameFormatter.fileName(movie, "mkv"),
         )
 
@@ -486,6 +488,7 @@ class MovieRenamerTest {
         assertEquals(listOf("Фантастика", "Приключения", "Драма"), hit?.genres)
         assertEquals(listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"), hit?.actors)
         assertEquals(7.8, hit?.rating)
+        assertEquals("TMDB", hit?.ratingSource)
     }
 
     @Test
@@ -497,10 +500,272 @@ class MovieRenamerTest {
             genres = listOf("Фантастика", "Приключения", "Драма"),
             actors = listOf("Первый Актёр", "Второй Актёр", "Третий Актёр"),
             rating = 8.5,
+            ratingSource = "TMDB",
         )
 
         val name = NameFormatter.fileName(media, "mkv")
         assertTrue(name.length <= 240)
         assertTrue(name.endsWith("1080p.mkv"))
+    }
+
+    @Test
+    fun `parses PoiskKino details with russian title genres cast and kp rating`() {
+        val hit = TitleCatalog.parsePoiskKinoMovieDetails(
+            """
+            {
+              "id": 301,
+              "name": "Матрица",
+              "alternativeName": "The Matrix",
+              "enName": "The Matrix",
+              "type": "movie",
+              "year": 1999,
+              "isSeries": false,
+              "rating": { "kp": 8.5, "imdb": 8.7, "tmdb": 8.1 },
+              "genres": [
+                {"name": "фантастика"},
+                {"name": "боевик"},
+                {"name": "триллер"},
+                {"name": "драма"}
+              ],
+              "persons": [
+                {"name": "Киану Ривз", "enProfession": "actor", "profession": "актеры"},
+                {"name": "Лоренс Фишбёрн", "enProfession": "actor", "profession": "актеры"},
+                {"name": "Кэрри-Энн Мосс", "enProfession": "actor", "profession": "актеры"},
+                {"name": "Лана Вачовски", "enProfession": "director", "profession": "режиссеры"}
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("Матрица", hit?.russianTitle)
+        assertEquals("The Matrix", hit?.originalTitle)
+        assertEquals(1999, hit?.year)
+        assertEquals(listOf("Фантастика", "Боевик", "Триллер"), hit?.genres)
+        assertEquals(listOf("Киану Ривз", "Лоренс Фишбёрн", "Кэрри-Энн Мосс"), hit?.actors)
+        assertEquals(8.5, hit?.rating)
+        assertEquals("КП", hit?.ratingSource)
+        assertEquals("ПоискКино", hit?.site)
+    }
+
+    @Test
+    fun `skips series in a PoiskKino search payload`() {
+        val hits = TitleCatalog.parsePoiskKinoSearch(
+            """
+            {
+              "docs": [
+                {
+                  "id": 1,
+                  "name": "Игра престолов",
+                  "alternativeName": "Game of Thrones",
+                  "type": "tv-series",
+                  "year": 2011,
+                  "isSeries": true
+                },
+                {
+                  "id": 603,
+                  "name": "Матрица",
+                  "alternativeName": "The Matrix",
+                  "type": "movie",
+                  "year": 1999,
+                  "isSeries": false,
+                  "rating": { "kp": 8.5 }
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(1, hits.size)
+        assertEquals("Матрица", hits.single().russianTitle)
+        assertEquals(1999, hits.single().year)
+    }
+
+    @Test
+    fun `fills missing catalog fields from the second service`() {
+        val tmdb = CatalogHit(
+            site = "TMDB",
+            title = "Dune",
+            year = 2021,
+            pageUrl = "https://www.themoviedb.org/movie/438631",
+            originalTitle = "Dune",
+            russianTitle = null,
+            originalLanguage = "en",
+            genres = emptyList(),
+            actors = listOf("Timothée Chalamet", "Rebecca Ferguson", "Oscar Isaac"),
+            rating = 7.8,
+            ratingSource = "TMDB",
+            catalogId = 438631,
+        )
+        val poiskKino = CatalogHit(
+            site = "ПоискКино",
+            title = "Дюна",
+            year = 2021,
+            pageUrl = "https://www.kinopoisk.ru/film/409600/",
+            originalTitle = "Dune",
+            russianTitle = "Дюна",
+            genres = listOf("Фантастика", "Приключения", "Драма"),
+            actors = listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"),
+            rating = 7.7,
+            ratingSource = "КП",
+            catalogId = 409600,
+        )
+
+        val merged = TitleCatalog.mergeCatalogHits(tmdb, poiskKino)
+
+        assertEquals("TMDB + ПоискКино", merged?.site)
+        assertEquals("Dune", merged?.originalTitle)
+        assertEquals("Дюна", merged?.russianTitle)
+        assertEquals(listOf("Фантастика", "Приключения", "Драма"), merged?.genres)
+        assertEquals(listOf("Timothée Chalamet", "Rebecca Ferguson", "Oscar Isaac"), merged?.actors)
+        assertEquals(7.8, merged?.rating)
+        assertEquals("TMDB", merged?.ratingSource)
+    }
+
+    @Test
+    fun `uses PoiskKino rating when TMDB has none`() {
+        val tmdb = CatalogHit(
+            site = "TMDB",
+            title = "Dune",
+            year = 2021,
+            pageUrl = null,
+            originalTitle = "Dune",
+            russianTitle = "Дюна",
+        )
+        val poiskKino = CatalogHit(
+            site = "ПоискКино",
+            title = "Дюна",
+            year = 2021,
+            pageUrl = null,
+            rating = 6.4,
+            ratingSource = "КП",
+        )
+        val merged = TitleCatalog.mergeCatalogHits(tmdb, poiskKino)
+        assertEquals(6.4, merged?.rating)
+        assertEquals("КП", merged?.ratingSource)
+
+        val media = MediaParser.parse(Path.of("Dune.2021.1080p.mkv")).copy(
+            originalTitle = "Dune",
+            russianTitle = "Дюна",
+            originalLanguage = "en",
+            rating = 6.4,
+            ratingSource = "TMDB",
+        )
+        assertEquals("Dune — Дюна (2021) (6.4 TMDB) 1080p.mkv", NameFormatter.fileName(media, "mkv"))
+    }
+
+    @Test
+    fun `keeps a complete TMDB hit and ignores fallback catalogs`() {
+        val local = MediaParser.parse(Path.of("Dune.2021.mkv"))
+        val tmdb = CatalogHit(
+            site = "TMDB",
+            title = "Дюна",
+            year = 2021,
+            pageUrl = "https://www.themoviedb.org/movie/438631",
+            originalTitle = "Dune",
+            russianTitle = "Дюна",
+            originalLanguage = "en",
+            genres = listOf("Фантастика"),
+            actors = listOf("Тимоти Шаламе"),
+            rating = 7.8,
+            ratingSource = "TMDB",
+        )
+        val chosen = TitleCatalog.chooseMovieHit(
+            local,
+            tmdb = tmdb,
+            poiskKino = CatalogHit("ПоискКино", "Дюна", 2021, null, rating = 7.7, ratingSource = "КП"),
+            fallbackHits = listOf(CatalogHit("iTunes", "Dune", 2021, null)),
+        )
+
+        assertEquals("TMDB", chosen?.site)
+        assertEquals(7.8, chosen?.rating)
+        assertEquals("TMDB", chosen?.ratingSource)
+        assertFalse(TitleCatalog.movieHitNeedsMoreData(tmdb))
+    }
+
+    @Test
+    fun `asks PoiskKino only for fields TMDB does not have`() {
+        val local = MediaParser.parse(Path.of("Dune.2021.mkv"))
+        val tmdb = CatalogHit(
+            site = "TMDB",
+            title = "Dune",
+            year = 2021,
+            pageUrl = null,
+            originalTitle = "Dune",
+            russianTitle = null,
+            actors = listOf("Timothée Chalamet"),
+            rating = 7.8,
+            ratingSource = "TMDB",
+        )
+        val poiskKino = CatalogHit(
+            site = "ПоискКино",
+            title = "Дюна",
+            year = 2021,
+            pageUrl = null,
+            russianTitle = "Дюна",
+            genres = listOf("Фантастика", "Приключения"),
+            rating = 7.7,
+            ratingSource = "КП",
+        )
+        val chosen = TitleCatalog.chooseMovieHit(
+            local,
+            tmdb,
+            poiskKino,
+            fallbackHits = listOf(CatalogHit("Wikipedia (en)", "Dune", 2021, null)),
+        )
+
+        assertTrue(TitleCatalog.movieHitNeedsMoreData(tmdb))
+        assertEquals("TMDB + ПоискКино", chosen?.site)
+        assertEquals("Дюна", chosen?.russianTitle)
+        assertEquals(listOf("Фантастика", "Приключения"), chosen?.genres)
+        assertEquals(listOf("Timothée Chalamet"), chosen?.actors)
+        assertEquals(7.8, chosen?.rating)
+        assertEquals("TMDB", chosen?.ratingSource)
+    }
+
+    @Test
+    fun `falls back to iTunes and Wikipedia when TMDB and PoiskKino return nothing`() {
+        val local = MediaParser.parse(Path.of("The.Matrix.1999.mkv"))
+        val chosen = TitleCatalog.chooseMovieHit(
+            local,
+            tmdb = null,
+            poiskKino = null,
+            fallbackHits = listOf(
+                CatalogHit("iTunes", "The Matrix Reloaded", 2003, null),
+                CatalogHit("iTunes", "The Matrix", 1999, null),
+                CatalogHit("Wikipedia (en)", "The Matrix", 1999, null),
+            ),
+        )
+
+        assertTrue(TitleCatalog.movieHitNeedsMoreData(null))
+        assertEquals("The Matrix", chosen?.title)
+        assertEquals(1999, chosen?.year)
+        assertTrue(chosen?.site in setOf("iTunes", "Wikipedia (en)"))
+    }
+
+    @Test
+    fun `uses PoiskKino when TMDB is down and skips fallback catalogs`() {
+        val local = MediaParser.parse(Path.of("Матрица.1999.mkv"))
+        val poiskKino = CatalogHit(
+            site = "ПоискКино",
+            title = "Матрица",
+            year = 1999,
+            pageUrl = "https://www.kinopoisk.ru/film/301/",
+            originalTitle = "The Matrix",
+            russianTitle = "Матрица",
+            genres = listOf("Фантастика"),
+            actors = listOf("Киану Ривз"),
+            rating = 8.5,
+            ratingSource = "КП",
+        )
+        val chosen = TitleCatalog.chooseMovieHit(
+            local,
+            tmdb = null,
+            poiskKino = poiskKino,
+            fallbackHits = listOf(CatalogHit("iTunes", "The Matrix", 1999, null)),
+        )
+
+        assertEquals("ПоискКино", chosen?.site)
+        assertEquals(8.5, chosen?.rating)
+        assertEquals("КП", chosen?.ratingSource)
     }
 }

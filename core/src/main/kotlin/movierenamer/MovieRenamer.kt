@@ -36,6 +36,7 @@ import kotlin.io.path.nameWithoutExtension
 import kotlin.streams.asSequence
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -72,11 +73,15 @@ object MovieRenamer {
             Talk.info("Исходники debug не трогаем. Результат: ${resultsDirectory ?: "не задан"}")
         }
         if (settings.lookupOnline) {
-            if (TitleCatalog.isTmdbConfigured()) {
-                Talk.info("Онлайн-поиск: TMDB; запасные каталоги: iTunes, TVMaze, Wikipedia")
+            val catalogs = buildList {
+                if (TitleCatalog.isTmdbConfigured()) add("TMDB")
+                if (TitleCatalog.isPoiskKinoConfigured()) add("ПоискКино")
+            }
+            if (catalogs.isNotEmpty()) {
+                Talk.info("Онлайн-поиск: ${catalogs.joinToString(" и ")}; запасные каталоги: iTunes, TVMaze, Wikipedia")
             } else {
                 Talk.info(
-                    "TMDB выключен: задайте TMDB_API_TOKEN для русских названий, жанров, актёров и рейтинга",
+                    "TMDB и ПоискКино выключены: задайте токены для русских названий, жанров, актёров и рейтинга",
                 )
                 Talk.info("Запасной онлайн-поиск: iTunes, TVMaze, Wikipedia")
             }
@@ -306,6 +311,7 @@ data class CatalogHit(
     val genres: List<String> = emptyList(),
     val actors: List<String> = emptyList(),
     val rating: Double? = null,
+    val ratingSource: String? = null,
     val catalogId: Int? = null,
 )
 
@@ -326,6 +332,7 @@ data class MediaInfo(
     val genres: List<String> = emptyList(),
     val actors: List<String> = emptyList(),
     val rating: Double? = null,
+    val ratingSource: String? = null,
 )
 
 // =============================================================================
@@ -946,7 +953,11 @@ object NameFormatter {
             }
             media.rating
                 ?.takeIf { it > 0.0 }
-                ?.let { add("[TMDB ${String.format(Locale.ROOT, "%.1f", it)}]") }
+                ?.let { value ->
+                    val score = String.format(Locale.ROOT, "%.1f", value)
+                    val source = media.ratingSource?.trim().orEmpty()
+                    add(if (source.isEmpty()) "($score)" else "($score $source)")
+                }
             media.resolution?.let(::add)
         }.joinToString(" ")
     }
@@ -1096,8 +1107,14 @@ object MediaPrinter {
                 println("Жанры: ${media.genres.ifEmpty { listOf("не найдены") }.joinToString()}")
                 println("Главные актёры: ${media.actors.ifEmpty { listOf("не найдены") }.joinToString()}")
                 println(
-                    "Рейтинг TMDB: " +
-                        (media.rating?.let { String.format(Locale.ROOT, "%.1f", it) } ?: "не найден"),
+                    "Рейтинг: " +
+                        (
+                            media.rating?.let { value ->
+                                val score = String.format(Locale.ROOT, "%.1f", value)
+                                val source = media.ratingSource?.trim().orEmpty()
+                                if (source.isEmpty()) score else "$score $source"
+                            } ?: "не найден"
+                            ),
                 )
             }
             println("Год: ${media.year ?: "не найден"}")
@@ -1155,11 +1172,12 @@ private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
         genres = hit.genres.take(3),
         actors = hit.actors.take(3),
         rating = hit.rating,
+        ratingSource = hit.ratingSource,
     )
 }
 
 // =============================================================================
-// 1000  Интернет: открытые каталоги названий, без ключей
+// 1000  Интернет: TMDB и ПоискКино, затем открытые каталоги без ключей
 // =============================================================================
 
 object TitleCatalog {
@@ -1180,25 +1198,102 @@ object TitleCatalog {
 
     fun isTmdbConfigured(): Boolean = tmdbToken() != null
 
+    fun isPoiskKinoConfigured(): Boolean = poiskKinoToken() != null
+
     fun find(media: MediaInfo): CatalogHit? {
         if (media.title.isBlank() || media.title == "Название не определено") {
             return null
         }
         val cacheKey = "${media.mediaType}|${media.title.lowercase()}|${media.year}"
         return cache.getOrPut(cacheKey) {
-            val tmdb = if (media.mediaType == MediaType.MOVIE) searchTmdbMovie(media) else null
-            tmdb ?: run {
-                val hits = buildList {
-                    addAll(searchItunes(media))
-                    if (media.mediaType == MediaType.TV_EPISODE) {
-                        addAll(searchTvMaze(media))
-                    }
-                    addAll(searchWikipedia(media, "ru"))
-                    addAll(searchWikipedia(media, "en"))
+            if (media.mediaType == MediaType.MOVIE) {
+                val tmdb = searchTmdbMovie(media)
+                val poiskKino = if (movieHitNeedsMoreData(tmdb) && isPoiskKinoConfigured()) {
+                    searchPoiskKinoMovie(media)
+                } else {
+                    null
                 }
-                pickBest(media, hits)
+                val fromPrimaryCatalogs = chooseMovieHit(media, tmdb, poiskKino, fallbackHits = emptyList())
+                if (fromPrimaryCatalogs != null) return@getOrPut fromPrimaryCatalogs
             }
+            chooseMovieHit(
+                media,
+                tmdb = null,
+                poiskKino = null,
+                fallbackHits = searchFallbackCatalogs(media),
+            )
         }
+    }
+
+    // TMDB → недостающие поля из ПоискКино → только если оба пустые, iTunes/TVMaze/Wikipedia.
+    fun chooseMovieHit(
+        local: MediaInfo,
+        tmdb: CatalogHit?,
+        poiskKino: CatalogHit?,
+        fallbackHits: List<CatalogHit>,
+    ): CatalogHit? {
+        if (tmdb != null && !movieHitNeedsMoreData(tmdb)) {
+            return tmdb
+        }
+        val fromPrimaryCatalogs = mergeCatalogHits(tmdb, poiskKino)
+        if (fromPrimaryCatalogs != null) return fromPrimaryCatalogs
+        return pickBest(local, fallbackHits)
+    }
+
+    fun movieHitNeedsMoreData(hit: CatalogHit?): Boolean {
+        if (hit == null) return true
+        return firstNonBlank(hit.originalTitle) == null ||
+            firstNonBlank(hit.russianTitle) == null ||
+            hit.genres.isEmpty() ||
+            hit.actors.isEmpty() ||
+            hit.rating == null ||
+            hit.rating <= 0.0
+    }
+
+    fun mergeCatalogHits(primary: CatalogHit?, secondary: CatalogHit?): CatalogHit? {
+        if (primary == null) return secondary
+        if (secondary == null) return primary
+        val primaryRating = primary.rating?.takeIf { it > 0.0 }
+        val secondaryRating = secondary.rating?.takeIf { it > 0.0 }
+        return primary.copy(
+            site = listOf(primary.site, secondary.site)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .joinToString(" + "),
+            title = firstNonBlank(primary.title, secondary.title) ?: primary.title,
+            year = primary.year ?: secondary.year,
+            pageUrl = primary.pageUrl ?: secondary.pageUrl,
+            originalTitle = firstNonBlank(primary.originalTitle, secondary.originalTitle),
+            russianTitle = firstNonBlank(primary.russianTitle, secondary.russianTitle),
+            originalLanguage = firstNonBlank(primary.originalLanguage, secondary.originalLanguage),
+            genres = primary.genres.ifEmpty { secondary.genres },
+            actors = primary.actors.ifEmpty { secondary.actors },
+            rating = primaryRating ?: secondaryRating,
+            ratingSource = if (primaryRating != null) {
+                primary.ratingSource
+            } else {
+                secondary.ratingSource
+            },
+            catalogId = primary.catalogId ?: secondary.catalogId,
+        )
+    }
+
+    private fun searchFallbackCatalogs(media: MediaInfo): List<CatalogHit> {
+        return buildList {
+            addAll(searchItunes(media))
+            if (media.mediaType == MediaType.TV_EPISODE) {
+                addAll(searchTvMaze(media))
+            }
+            addAll(searchWikipedia(media, "ru"))
+            addAll(searchWikipedia(media, "en"))
+        }
+    }
+
+    private fun firstNonBlank(vararg values: String?): String? {
+        return values
+            .mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }
+            .firstOrNull()
     }
 
     fun pickBest(local: MediaInfo, hits: List<CatalogHit>): CatalogHit? {
@@ -1210,7 +1305,7 @@ object TitleCatalog {
     }
 
     private fun score(local: MediaInfo, hit: CatalogHit): Int {
-        return listOfNotNull(hit.title, hit.originalTitle)
+        return listOfNotNull(hit.title, hit.originalTitle, hit.russianTitle)
             .distinct()
             .maxOfOrNull { candidate -> scoreTitle(local, candidate, hit.year) }
             ?: -1
@@ -1278,6 +1373,7 @@ object TitleCatalog {
                         russianTitle = russianTitle,
                         originalLanguage = item.str("original_language"),
                         rating = item.double("vote_average")?.takeIf { it > 0.0 },
+                        ratingSource = item.double("vote_average")?.takeIf { it > 0.0 }?.let { "TMDB" },
                         catalogId = id,
                     )
                 }
@@ -1306,6 +1402,7 @@ object TitleCatalog {
                 .mapNotNull { it.str("name") }
                 .distinct()
                 .take(3)
+            val rating = root.double("vote_average")?.takeIf { it > 0.0 } ?: fallback?.rating
             CatalogHit(
                 site = "TMDB",
                 title = russianTitle,
@@ -1316,10 +1413,111 @@ object TitleCatalog {
                 originalLanguage = root.str("original_language") ?: fallback?.originalLanguage,
                 genres = genres,
                 actors = actors,
-                rating = root.double("vote_average")?.takeIf { it > 0.0 } ?: fallback?.rating,
+                rating = rating,
+                ratingSource = when {
+                    root.double("vote_average")?.let { it > 0.0 } == true -> "TMDB"
+                    else -> fallback?.ratingSource ?: rating?.let { "TMDB" }
+                },
                 catalogId = id,
             )
         }.getOrNull()
+    }
+
+    private fun searchPoiskKinoMovie(media: MediaInfo): CatalogHit? {
+        val token = poiskKinoToken() ?: return null
+        val url = "https://api.poiskkino.dev/v1.4/movie/search?query=${enc(media.title)}&limit=10"
+        val body = get(url, apiKey = token) ?: return null
+        val candidates = parsePoiskKinoSearch(body)
+        val candidate = pickBest(media, candidates) ?: return null
+        val id = candidate.catalogId ?: return candidate
+        val details = get("https://api.poiskkino.dev/v1.4/movie/$id", apiKey = token) ?: return candidate
+        return parsePoiskKinoMovieDetails(details, candidate) ?: candidate
+    }
+
+    fun parsePoiskKinoSearch(body: String): List<CatalogHit> {
+        return runCatching {
+            json.parseToJsonElement(body).jsonObject["docs"]?.jsonArray.orEmpty()
+                .take(10)
+                .mapNotNull { element ->
+                    runCatching { parsePoiskKinoMovie(element.jsonObject) }.getOrNull()
+                }
+        }.getOrDefault(emptyList())
+    }
+
+    fun parsePoiskKinoMovieDetails(body: String, fallback: CatalogHit? = null): CatalogHit? {
+        return runCatching {
+            parsePoiskKinoMovie(json.parseToJsonElement(body).jsonObject, fallback)
+        }.getOrNull()
+    }
+
+    private fun parsePoiskKinoMovie(root: JsonObject, fallback: CatalogHit? = null): CatalogHit? {
+        if (root.bool("isSeries") == true) return null
+        val type = root.str("type")?.lowercase()
+        if (type != null && type !in setOf("movie", "cartoon", "anime")) {
+            return null
+        }
+        val id = root.int("id") ?: fallback?.catalogId ?: return null
+        val russianTitle = firstNonBlank(root.str("name"), fallback?.russianTitle, fallback?.title)
+            ?: return null
+        val originalTitle = firstNonBlank(
+            root.str("alternativeName"),
+            root.str("enName"),
+            fallback?.originalTitle,
+        )
+        val ratingPair: Pair<Double?, String?> = poiskKinoRating(root)
+            ?: fallback?.rating?.let { it to fallback.ratingSource }
+            ?: (null to null)
+        val rating = ratingPair.first
+        val ratingSource = ratingPair.second
+        val genres = runCatching { root["genres"]?.jsonArray }.getOrNull().orEmpty()
+            .mapNotNull { runCatching { it.jsonObject.str("name")?.let(::prettyGenre) }.getOrNull() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .take(3)
+            .ifEmpty { fallback?.genres.orEmpty() }
+        val actors = runCatching { root["persons"]?.jsonArray }.getOrNull().orEmpty()
+            .mapNotNull { runCatching { it.jsonObject }.getOrNull() }
+            .filter(::isPoiskKinoActor)
+            .mapNotNull { firstNonBlank(it.str("name"), it.str("enName")) }
+            .distinct()
+            .take(3)
+            .ifEmpty { fallback?.actors.orEmpty() }
+        return CatalogHit(
+            site = "ПоискКино",
+            title = russianTitle,
+            year = root.int("year") ?: fallback?.year,
+            pageUrl = "https://www.kinopoisk.ru/film/$id/",
+            originalTitle = originalTitle,
+            russianTitle = russianTitle,
+            originalLanguage = fallback?.originalLanguage,
+            genres = genres,
+            actors = actors,
+            rating = rating,
+            ratingSource = ratingSource,
+            catalogId = id,
+        )
+    }
+
+    private fun poiskKinoRating(root: JsonObject): Pair<Double, String>? {
+        val rating = runCatching { root["rating"]?.jsonObject }.getOrNull() ?: return null
+        rating.double("kp")?.takeIf { it > 0.0 }?.let { return it to "КП" }
+        rating.double("imdb")?.takeIf { it > 0.0 }?.let { return it to "IMDb" }
+        rating.double("tmdb")?.takeIf { it > 0.0 }?.let { return it to "TMDB" }
+        return null
+    }
+
+    private fun isPoiskKinoActor(person: JsonObject): Boolean {
+        val en = person.str("enProfession")?.lowercase().orEmpty()
+        val ru = person.str("profession")?.lowercase().orEmpty()
+        return en == "actor" || ru == "актеры" || ru == "актёры" || ru.contains("актер")
+    }
+
+    private fun prettyGenre(name: String): String {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return trimmed
+        return trimmed.replaceFirstChar { char ->
+            if (char.isLowerCase()) char.titlecase(Locale.forLanguageTag("ru")) else char.toString()
+        }
     }
 
     private fun searchItunes(media: MediaInfo): List<CatalogHit> {
@@ -1410,6 +1608,10 @@ object TitleCatalog {
         return runCatching { this[key]?.jsonPrimitive?.intOrNull }.getOrNull()
     }
 
+    private fun JsonObject.bool(key: String): Boolean? {
+        return runCatching { this[key]?.jsonPrimitive?.booleanOrNull }.getOrNull()
+    }
+
     private fun JsonObject.double(key: String): Double? {
         return runCatching { this[key]?.jsonPrimitive?.doubleOrNull }.getOrNull()
     }
@@ -1425,7 +1627,14 @@ object TitleCatalog {
         return raw?.trim()?.removePrefix("Bearer ")?.takeIf(String::isNotBlank)
     }
 
-    private fun get(url: String, bearerToken: String? = null): String? {
+    private fun poiskKinoToken(): String? {
+        val raw = System.getenv("POISKKINO_API_TOKEN")
+            ?.takeIf(String::isNotBlank)
+            ?: System.getProperty("poiskkino.api.token")?.takeIf(String::isNotBlank)
+        return raw?.trim()?.takeIf(String::isNotBlank)
+    }
+
+    private fun get(url: String, bearerToken: String? = null, apiKey: String? = null): String? {
         httpRequests.incrementAndGet()
         return runCatching {
             Thread.sleep(120)
@@ -1436,6 +1645,9 @@ object TitleCatalog {
                 .GET()
             if (bearerToken != null) {
                 builder.header("Authorization", "Bearer $bearerToken")
+            }
+            if (apiKey != null) {
+                builder.header("X-API-KEY", apiKey)
             }
             val request = builder.build()
             val response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
