@@ -19,6 +19,7 @@ out/
 # Local machine / secrets
 local.properties
 *.log
+/start/src/main/kotlin/movierenamer/tmdb-token.local.properties
 
 # Local library used for scanning (not source)
 /movies/

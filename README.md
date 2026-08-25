@@ -9,7 +9,13 @@ TMDB API Read Access Token:
 
 1. Создайте аккаунт на <https://www.themoviedb.org/>.
 2. Получите **API Read Access Token** в настройках API.
-3. Перед запуском задайте переменную окружения.
+3. Скопируйте файл
+   `start/src/main/kotlin/movierenamer/tmdb-token.example.properties` как
+   `tmdb-token.local.properties` в той же папке.
+4. Вставьте токен вместо `PASTE_TMDB_READ_ACCESS_TOKEN_HERE`.
+
+Локальный файл уже добавлен в `.gitignore`. Альтернативный способ — переменная
+окружения, которая имеет приоритет над локальным файлом.
 
 PowerShell:
 
