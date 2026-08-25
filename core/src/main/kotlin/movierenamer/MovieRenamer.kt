@@ -28,6 +28,7 @@ import java.time.Duration
 import java.time.LocalTime
 import java.time.Year
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.extension
 import kotlin.io.path.isDirectory
@@ -36,6 +37,8 @@ import kotlin.streams.asSequence
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -69,7 +72,14 @@ object MovieRenamer {
             Talk.info("Исходники debug не трогаем. Результат: ${resultsDirectory ?: "не задан"}")
         }
         if (settings.lookupOnline) {
-            Talk.info("Онлайн-поиск: iTunes, TVMaze, Wikipedia")
+            if (TitleCatalog.isTmdbConfigured()) {
+                Talk.info("Онлайн-поиск: TMDB; запасные каталоги: iTunes, TVMaze, Wikipedia")
+            } else {
+                Talk.info(
+                    "TMDB выключен: задайте TMDB_API_TOKEN для русских названий, жанров, актёров и рейтинга",
+                )
+                Talk.info("Запасной онлайн-поиск: iTunes, TVMaze, Wikipedia")
+            }
         }
 
         if (!moviesDirectory.isDirectory()) {
@@ -290,6 +300,13 @@ data class CatalogHit(
     val title: String,
     val year: Int?,
     val pageUrl: String?,
+    val originalTitle: String? = null,
+    val russianTitle: String? = null,
+    val originalLanguage: String? = null,
+    val genres: List<String> = emptyList(),
+    val actors: List<String> = emptyList(),
+    val rating: Double? = null,
+    val catalogId: Int? = null,
 )
 
 data class MediaInfo(
@@ -303,6 +320,12 @@ data class MediaInfo(
     val source: String?,
     val editions: List<String>,
     val languages: List<String>,
+    val originalTitle: String? = null,
+    val russianTitle: String? = null,
+    val originalLanguage: String? = null,
+    val genres: List<String> = emptyList(),
+    val actors: List<String> = emptyList(),
+    val rating: Double? = null,
 )
 
 // =============================================================================
@@ -901,25 +924,51 @@ private fun String.trimReleaseSeparators(): String {
 }
 
 object NameFormatter {
+    private const val MAX_FILE_NAME_LENGTH = 240
+
     fun fileName(media: MediaInfo, extension: String): String {
         val stem = when (media.mediaType) {
             MediaType.MOVIE -> movieStem(media)
             MediaType.TV_EPISODE -> episodeStem(media)
         }
-        return sanitize("$stem.$extension")
+        return limitLength(sanitize("$stem.$extension"))
     }
 
     private fun movieStem(media: MediaInfo): String {
         return buildList {
-            add(media.title)
+            add(movieTitles(media))
             media.year?.let { add("($it)") }
-            media.resolution?.let(::add)
-            media.source?.let(::add)
-            addAll(media.editions)
-            if (media.languages.isNotEmpty()) {
-                add(media.languages.joinToString(" "))
+            if (media.genres.isNotEmpty()) {
+                add("[${media.genres.take(3).joinToString(", ")}]")
             }
+            if (media.actors.isNotEmpty()) {
+                add("[${media.actors.take(3).joinToString(", ")}]")
+            }
+            media.rating
+                ?.takeIf { it > 0.0 }
+                ?.let { add("[TMDB ${String.format(Locale.ROOT, "%.1f", it)}]") }
+            media.resolution?.let(::add)
         }.joinToString(" ")
+    }
+
+    private fun movieTitles(media: MediaInfo): String {
+        val original = media.originalTitle?.trim().orEmpty()
+        val russian = media.russianTitle?.trim().orEmpty()
+        if (media.originalLanguage.equals("ru", ignoreCase = true)) {
+            return russian.ifBlank { original }.ifBlank { media.title }
+        }
+        return when {
+            original.isBlank() && russian.isBlank() -> media.title
+            original.isBlank() -> russian
+            russian.isBlank() || sameTitle(original, russian) -> original
+            else -> "$original — $russian"
+        }
+    }
+
+    private fun sameTitle(first: String, second: String): Boolean {
+        fun fold(value: String): String = value.lowercase()
+            .replace(Regex("""[^\p{L}\p{N}]"""), "")
+        return fold(first) == fold(second)
     }
 
     private fun episodeStem(media: MediaInfo): String {
@@ -929,7 +978,6 @@ object NameFormatter {
             add(code)
             media.episodeTitle?.let(::add)
             media.resolution?.let(::add)
-            media.source?.let(::add)
         }.joinToString(" ")
     }
 
@@ -939,6 +987,20 @@ object NameFormatter {
             .replace(Regex("""[<>:"/\\|?*\u0000-\u001F]"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim(' ', '.')
+    }
+
+    private fun limitLength(value: String): String {
+        if (value.length <= MAX_FILE_NAME_LENGTH) return value
+        val extensionIndex = value.lastIndexOf('.')
+        val extension = if (extensionIndex > 0) value.substring(extensionIndex) else ""
+        val stem = if (extensionIndex > 0) value.substring(0, extensionIndex) else value
+        val available = MAX_FILE_NAME_LENGTH - extension.length - 1
+        val prefixLength = available * 2 / 3
+        val suffixLength = available - prefixLength
+        return stem.take(prefixLength).trimEnd() +
+            "…" +
+            stem.takeLast(suffixLength).trimStart() +
+            extension
     }
 }
 
@@ -1028,6 +1090,16 @@ object MediaPrinter {
             println("Полный путь: ${plan.file}")
             println("Тип: ${media.mediaType.displayName}")
             println("Название: ${media.title}")
+            if (media.mediaType == MediaType.MOVIE) {
+                println("Оригинальное название: ${media.originalTitle ?: "не найдено"}")
+                println("Русское название: ${media.russianTitle ?: "не найдено"}")
+                println("Жанры: ${media.genres.ifEmpty { listOf("не найдены") }.joinToString()}")
+                println("Главные актёры: ${media.actors.ifEmpty { listOf("не найдены") }.joinToString()}")
+                println(
+                    "Рейтинг TMDB: " +
+                        (media.rating?.let { String.format(Locale.ROOT, "%.1f", it) } ?: "не найден"),
+                )
+            }
             println("Год: ${media.year ?: "не найден"}")
             if (media.mediaType == MediaType.TV_EPISODE) {
                 println("Сезон: ${media.season ?: "не найден"}")
@@ -1077,6 +1149,12 @@ private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
     return copy(
         title = TitleCatalog.cleanTitle(hit.title).ifBlank { title },
         year = year ?: hit.year,
+        originalTitle = hit.originalTitle?.let(TitleCatalog::cleanTitle),
+        russianTitle = hit.russianTitle?.let(TitleCatalog::cleanTitle),
+        originalLanguage = hit.originalLanguage,
+        genres = hit.genres.take(3),
+        actors = hit.actors.take(3),
+        rating = hit.rating,
     )
 }
 
@@ -1100,21 +1178,26 @@ object TitleCatalog {
 
     fun requestCount(): Int = httpRequests.get()
 
+    fun isTmdbConfigured(): Boolean = tmdbToken() != null
+
     fun find(media: MediaInfo): CatalogHit? {
         if (media.title.isBlank() || media.title == "Название не определено") {
             return null
         }
         val cacheKey = "${media.mediaType}|${media.title.lowercase()}|${media.year}"
         return cache.getOrPut(cacheKey) {
-            val hits = buildList {
-                addAll(searchItunes(media))
-                if (media.mediaType == MediaType.TV_EPISODE) {
-                    addAll(searchTvMaze(media))
+            val tmdb = if (media.mediaType == MediaType.MOVIE) searchTmdbMovie(media) else null
+            tmdb ?: run {
+                val hits = buildList {
+                    addAll(searchItunes(media))
+                    if (media.mediaType == MediaType.TV_EPISODE) {
+                        addAll(searchTvMaze(media))
+                    }
+                    addAll(searchWikipedia(media, "ru"))
+                    addAll(searchWikipedia(media, "en"))
                 }
-                addAll(searchWikipedia(media, "ru"))
-                addAll(searchWikipedia(media, "en"))
+                pickBest(media, hits)
             }
-            pickBest(media, hits)
         }
     }
 
@@ -1127,8 +1210,15 @@ object TitleCatalog {
     }
 
     private fun score(local: MediaInfo, hit: CatalogHit): Int {
+        return listOfNotNull(hit.title, hit.originalTitle)
+            .distinct()
+            .maxOfOrNull { candidate -> scoreTitle(local, candidate, hit.year) }
+            ?: -1
+    }
+
+    private fun scoreTitle(local: MediaInfo, candidateTitle: String, candidateYear: Int?): Int {
         val a = foldTitle(local.title)
-        val b = foldTitle(hit.title)
+        val b = foldTitle(candidateTitle)
         if (a.isBlank() || b.isBlank()) return -1
 
         val exactTitle = a == b
@@ -1148,8 +1238,8 @@ object TitleCatalog {
             (coverage * 30 + precision * 20).toInt()
         }
 
-        if (local.year != null && hit.year != null) {
-            val delta = kotlin.math.abs(local.year - hit.year)
+        if (local.year != null && candidateYear != null) {
+            val delta = kotlin.math.abs(local.year - candidateYear)
             points += when {
                 delta == 0 -> 25
                 delta == 1 -> 5
@@ -1164,6 +1254,72 @@ object TitleCatalog {
             .replace(Regex("""[^\p{L}\p{N}\s]"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
+    }
+
+    private fun searchTmdbMovie(media: MediaInfo): CatalogHit? {
+        val token = tmdbToken() ?: return null
+        val year = media.year?.let { "&year=$it" }.orEmpty()
+        val url = "https://api.themoviedb.org/3/search/movie" +
+            "?query=${enc(media.title)}&language=ru-RU&include_adult=false$year"
+        val body = get(url, token) ?: return null
+        val candidates = runCatching {
+            json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
+                .take(10)
+                .mapNotNull { element ->
+                    val item = element.jsonObject
+                    val id = item.int("id") ?: return@mapNotNull null
+                    val russianTitle = item.str("title") ?: return@mapNotNull null
+                    CatalogHit(
+                        site = "TMDB",
+                        title = russianTitle,
+                        year = yearOf(item.str("release_date")),
+                        pageUrl = "https://www.themoviedb.org/movie/$id",
+                        originalTitle = item.str("original_title"),
+                        russianTitle = russianTitle,
+                        originalLanguage = item.str("original_language"),
+                        rating = item.double("vote_average")?.takeIf { it > 0.0 },
+                        catalogId = id,
+                    )
+                }
+        }.getOrDefault(emptyList())
+        val candidate = pickBest(media, candidates) ?: return null
+        val id = candidate.catalogId ?: return candidate
+        val detailsUrl = "https://api.themoviedb.org/3/movie/$id" +
+            "?language=ru-RU&append_to_response=credits"
+        val details = get(detailsUrl, token) ?: return candidate
+        return parseTmdbMovieDetails(details, candidate) ?: candidate
+    }
+
+    fun parseTmdbMovieDetails(body: String, fallback: CatalogHit? = null): CatalogHit? {
+        return runCatching {
+            val root = json.parseToJsonElement(body).jsonObject
+            val id = root.int("id") ?: fallback?.catalogId ?: return@runCatching null
+            val russianTitle = root.str("title") ?: fallback?.russianTitle ?: fallback?.title
+                ?: return@runCatching null
+            val genres = root["genres"]?.jsonArray.orEmpty()
+                .mapNotNull { it.jsonObject.str("name") }
+                .distinct()
+                .take(3)
+            val actors = root["credits"]?.jsonObject?.get("cast")?.jsonArray.orEmpty()
+                .map { it.jsonObject }
+                .sortedBy { it.int("order") ?: Int.MAX_VALUE }
+                .mapNotNull { it.str("name") }
+                .distinct()
+                .take(3)
+            CatalogHit(
+                site = "TMDB",
+                title = russianTitle,
+                year = yearOf(root.str("release_date")) ?: fallback?.year,
+                pageUrl = "https://www.themoviedb.org/movie/$id",
+                originalTitle = root.str("original_title") ?: fallback?.originalTitle,
+                russianTitle = russianTitle,
+                originalLanguage = root.str("original_language") ?: fallback?.originalLanguage,
+                genres = genres,
+                actors = actors,
+                rating = root.double("vote_average")?.takeIf { it > 0.0 } ?: fallback?.rating,
+                catalogId = id,
+            )
+        }.getOrNull()
     }
 
     private fun searchItunes(media: MediaInfo): List<CatalogHit> {
@@ -1250,20 +1406,38 @@ object TitleCatalog {
         return runCatching { this[key]?.jsonPrimitive?.contentOrNull }.getOrNull()
     }
 
+    private fun JsonObject.int(key: String): Int? {
+        return runCatching { this[key]?.jsonPrimitive?.intOrNull }.getOrNull()
+    }
+
+    private fun JsonObject.double(key: String): Double? {
+        return runCatching { this[key]?.jsonPrimitive?.doubleOrNull }.getOrNull()
+    }
+
     private fun enc(value: String): String {
         return URLEncoder.encode(value, StandardCharsets.UTF_8)
     }
 
-    private fun get(url: String): String? {
+    private fun tmdbToken(): String? {
+        val raw = System.getenv("TMDB_API_TOKEN")
+            ?.takeIf(String::isNotBlank)
+            ?: System.getProperty("tmdb.api.token")?.takeIf(String::isNotBlank)
+        return raw?.trim()?.removePrefix("Bearer ")?.takeIf(String::isNotBlank)
+    }
+
+    private fun get(url: String, bearerToken: String? = null): String? {
         httpRequests.incrementAndGet()
         return runCatching {
             Thread.sleep(120)
-            val request = HttpRequest.newBuilder(URI.create(url))
+            val builder = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(10))
                 .header("Accept", "application/json")
                 .header("User-Agent", "MovieRenamer/1.0 (home media library; title lookup)")
                 .GET()
-                .build()
+            if (bearerToken != null) {
+                builder.header("Authorization", "Bearer $bearerToken")
+            }
+            val request = builder.build()
             val response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
             if (response.statusCode() in 200..299) response.body() else null
         }.getOrNull()

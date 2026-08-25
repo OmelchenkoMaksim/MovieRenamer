@@ -165,7 +165,7 @@ class MovieRenamerTest {
             Path.of("The.Matrix.1999.1080p.BluRay.x264.RUS.ENG.mkv"),
         )
         assertEquals(
-            "The Matrix (1999) 1080p BluRay RU EN.mkv",
+            "The Matrix (1999) 1080p.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
     }
@@ -178,7 +178,7 @@ class MovieRenamerTest {
         try {
             val plan = RenamePlanner.planAll(library, listOf(video)).single()
             assertEquals(PlanStatus.READY, plan.status)
-            assertEquals("The Matrix (1999) 1080p BluRay.mkv", plan.proposedName)
+            assertEquals("The Matrix (1999) 1080p.mkv", plan.proposedName)
         } finally {
             Files.deleteIfExists(video)
             Files.deleteIfExists(library)
@@ -314,16 +314,16 @@ class MovieRenamerTest {
 
     @Test
     fun `unwraps a year in parentheses and treats an already-clean name as already ok`() {
-        val media = MediaParser.parse(Path.of("The Matrix (1999) 1080p BluRay.mkv"))
+        val media = MediaParser.parse(Path.of("The Matrix (1999) 1080p.mkv"))
         assertEquals("The Matrix", media.title)
         assertEquals(1999, media.year)
         assertEquals(
-            "The Matrix (1999) 1080p BluRay.mkv",
+            "The Matrix (1999) 1080p.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
 
         val library = Files.createTempDirectory("library-")
-        val video = library.resolve("The Matrix (1999) 1080p BluRay.mkv")
+        val video = library.resolve("The Matrix (1999) 1080p.mkv")
         Files.createFile(video)
         try {
             val plan = RenamePlanner.planAll(library, listOf(video)).single()
@@ -406,5 +406,101 @@ class MovieRenamerTest {
                 listOf(CatalogHit("Wikipedia", "Ёлки 10", null, null)),
             ),
         )
+    }
+
+    @Test
+    fun `formats rich TMDB movie metadata without release tags`() {
+        val media = MediaParser.parse(Path.of("Dune.2021.2160p.WEB-DL.RUS.ENG.mkv")).copy(
+            originalTitle = "Dune",
+            russianTitle = "Дюна",
+            originalLanguage = "en",
+            genres = listOf("Фантастика", "Приключения", "Драма"),
+            actors = listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"),
+            rating = 8.2,
+        )
+
+        assertEquals(
+            "Dune — Дюна (2021) [Фантастика, Приключения, Драма] " +
+                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] [TMDB 8.2] 2160p.mkv",
+            NameFormatter.fileName(media, "mkv"),
+        )
+    }
+
+    @Test
+    fun `uses one title for a russian movie and keeps episode names short`() {
+        val movie = MediaParser.parse(Path.of("Брат.1997.1080p.BluRay.RUS.mkv")).copy(
+            originalTitle = "Брат",
+            russianTitle = "Брат",
+            originalLanguage = "ru",
+            genres = listOf("Драма", "Криминал"),
+            actors = listOf("Сергей Бодров мл.", "Виктор Сухоруков", "Светлана Письмиченко"),
+            rating = 7.9,
+        )
+        assertEquals(
+            "Брат (1997) [Драма, Криминал] " +
+                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] [TMDB 7.9] 1080p.mkv",
+            NameFormatter.fileName(movie, "mkv"),
+        )
+
+        val episode = MediaParser.parse(
+            Path.of("Breaking Bad", "Breaking.Bad.S02E03.Bit.by.a.Dead.Bee.720p.WEB-DL.mkv"),
+        )
+        assertEquals(
+            "Breaking Bad S02E03 Bit by a Dead Bee 720p.mkv",
+            NameFormatter.fileName(episode, "mkv"),
+        )
+    }
+
+    @Test
+    fun `parses TMDB details with russian title genres cast and rating`() {
+        val hit = TitleCatalog.parseTmdbMovieDetails(
+            """
+            {
+              "id": 438631,
+              "title": "Дюна",
+              "original_title": "Dune",
+              "original_language": "en",
+              "release_date": "2021-09-15",
+              "vote_average": 7.8,
+              "genres": [
+                {"id": 878, "name": "Фантастика"},
+                {"id": 12, "name": "Приключения"},
+                {"id": 18, "name": "Драма"},
+                {"id": 28, "name": "Боевик"}
+              ],
+              "credits": {
+                "cast": [
+                  {"name": "Оскар Айзек", "order": 2},
+                  {"name": "Тимоти Шаламе", "order": 0},
+                  {"name": "Ребекка Фергюсон", "order": 1},
+                  {"name": "Джейсон Момоа", "order": 3}
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("Дюна", hit?.russianTitle)
+        assertEquals("Dune", hit?.originalTitle)
+        assertEquals(2021, hit?.year)
+        assertEquals(listOf("Фантастика", "Приключения", "Драма"), hit?.genres)
+        assertEquals(listOf("Тимоти Шаламе", "Ребекка Фергюсон", "Оскар Айзек"), hit?.actors)
+        assertEquals(7.8, hit?.rating)
+    }
+
+    @Test
+    fun `limits rich file names for windows`() {
+        val media = MediaParser.parse(Path.of("Movie.2020.1080p.mkv")).copy(
+            originalTitle = "A".repeat(180),
+            russianTitle = "Б".repeat(180),
+            originalLanguage = "en",
+            genres = listOf("Фантастика", "Приключения", "Драма"),
+            actors = listOf("Первый Актёр", "Второй Актёр", "Третий Актёр"),
+            rating = 8.5,
+        )
+
+        val name = NameFormatter.fileName(media, "mkv")
+        assertTrue(name.length <= 240)
+        assertTrue(name.endsWith("1080p.mkv"))
     }
 }
