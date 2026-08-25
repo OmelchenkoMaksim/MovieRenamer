@@ -1968,7 +1968,19 @@ object TitleCatalog {
             }
             val request = builder.build()
             val response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-            if (response.statusCode() in 200..299) response.body() else null
+            val code = response.statusCode()
+            if (code in 200..299) {
+                response.body()
+            } else {
+                if (url.contains("themoviedb.org")) {
+                    Talk.error("TMDB ответил HTTP $code")
+                }
+                null
+            }
+        }.onFailure { error ->
+            if (url.contains("themoviedb.org")) {
+                Talk.error("TMDB запрос не удался: ${error.message ?: error.javaClass.simpleName}")
+            }
         }.getOrNull()
     }
 }
