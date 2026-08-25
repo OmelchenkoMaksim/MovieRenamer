@@ -1,13 +1,13 @@
-package movierenamer.parser
+package movierenamer
 
-import movierenamer.model.MediaType
+import java.nio.file.Files
 import java.nio.file.Path
 import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-class MediaParserTest {
+class MovieRenamerTest {
 
     @Test
     fun `parses a movie release name`() {
@@ -88,5 +88,19 @@ class MediaParserTest {
 
         assertEquals("Ёлки", media.title)
         assertEquals(2010, media.year)
+    }
+
+    @Test
+    fun `finds video files with cyrillic names`() {
+        val directory = Files.createTempDirectory("фильмы-")
+        val video = directory.resolve("Матрица.1999.mkv")
+        Files.createFile(video)
+        try {
+            val found = VideoScanner.findVideoFiles(directory)
+            assertEquals("Матрица.1999.mkv", found.single().fileName.toString())
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(directory)
+        }
     }
 }
