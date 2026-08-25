@@ -15,23 +15,30 @@ import java.nio.charset.CharsetDecoder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.text.Normalizer
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import kotlin.io.path.extension
 import kotlin.io.path.isDirectory
-import kotlin.io.path.isRegularFile
 import kotlin.io.path.nameWithoutExtension
 import kotlin.streams.asSequence
 
+// =============================================================================
+// 0000  Старт: консоль → папка → скан → разбор имени → печать
+// =============================================================================
+
 object MovieRenamer {
-    fun run(args: Array<String>) {
+    fun run(settings: LaunchSettings) {
+        // 0000.01 Иначе кириллица в консоли Windows поедет.
         Console.install()
 
-        val moviesDirectory = resolveMoviesDirectory(args) ?: return
+        val moviesDirectory = settings.moviesDirectory.toAbsolutePath().normalize()
 
         Console.info("Запуск Movie Renamer")
+        Console.info("Режим: ${settings.mode.displayName}")
         Console.info("Рабочая директория: $moviesDirectory")
 
         if (!moviesDirectory.isDirectory()) {
@@ -39,6 +46,7 @@ object MovieRenamer {
             return
         }
 
+        // 0000.03 Обход только читает. FileGuard не даёт выйти за корень библиотеки.
         val videoFiles = try {
             VideoScanner.findVideoFiles(moviesDirectory)
         } catch (exception: Exception) {
@@ -54,37 +62,60 @@ object MovieRenamer {
         Console.info("Найдено файлов: ${videoFiles.size}")
         println()
 
-        videoFiles.forEachIndexed { index, file ->
-            MediaPrinter.print(
-                index = index,
-                file = file,
-                media = MediaParser.parse(file),
-            )
+        // 0000.04 Сначала план на все файлы, потом действие. Так не столкнёмся именами.
+        val plans = RenamePlanner.planAll(moviesDirectory, videoFiles)
+        var applied = 0
+        var skipped = 0
+        var failed = 0
+
+        plans.forEachIndexed { index, plan ->
+            MediaPrinter.print(index, plan, settings.mode)
+
+            if (!plan.status.canApply) {
+                skipped++
+                return@forEachIndexed
+            }
+
+            when (settings.mode) {
+                WorkMode.PREVIEW, WorkMode.DEBUG -> skipped++
+                WorkMode.RENAME, WorkMode.COPY -> {
+                    try {
+                        applyPlan(settings.mode, moviesDirectory, plan)
+                        applied++
+                    } catch (exception: Exception) {
+                        Console.error("Не удалось обработать ${plan.file.fileName}: ${exception.message}")
+                        failed++
+                    }
+                }
+            }
         }
 
         println()
-        Console.info("Анализ завершён")
-        Console.info("Файлы не изменялись")
+        Console.info("Готово")
+        Console.info("Можно сделать: ${plans.count { it.status.canApply }}")
+        Console.info("Не получится / не нужно: ${plans.count { !it.status.canApply }}")
+        if (settings.mode.isReadOnly) {
+            Console.info("Файлы не изменялись")
+        } else {
+            Console.info("Сделано: $applied, пропущено: $skipped, ошибок: $failed")
+        }
     }
 
-    private fun resolveMoviesDirectory(args: Array<String>): Path? {
-        if (args.size > 1) {
-            Console.error("Использование: MovieRenamer [директория]")
-            return null
+    private fun applyPlan(mode: WorkMode, library: Path, plan: RenamePlan) {
+        val target = plan.target ?: return
+        when (mode) {
+            WorkMode.RENAME -> FileGuard.rename(library, plan.file, target)
+            WorkMode.COPY -> FileGuard.copy(library, plan.file, target)
+            WorkMode.PREVIEW, WorkMode.DEBUG -> Unit
         }
-
-        val rawPath = args.firstOrNull() ?: Config.moviesDirectory.toString()
-        return Path.of(rawPath).toAbsolutePath().normalize()
     }
 }
 
-// -----------------------------------------------------------------------------
-// Config
-// -----------------------------------------------------------------------------
+// =============================================================================
+// 0001  Данные: что крутим и в каком виде храним результат
+// =============================================================================
 
 object Config {
-    val moviesDirectory: Path = Path.of("movies")
-
     val videoExtensions: Set<String> = setOf(
         "mkv",
         "mp4",
@@ -97,15 +128,42 @@ object Config {
     )
 }
 
-// -----------------------------------------------------------------------------
-// Models
-// -----------------------------------------------------------------------------
+// 0001.04 Режим задаётся в Main.kt.
+enum class WorkMode(val displayName: String, val isReadOnly: Boolean) {
+    PREVIEW("просмотр: что можно сделать", true),
+    RENAME("переименовать на месте", false),
+    COPY("копия с новым именем, оригинал оставить", false),
+    DEBUG("отладка разбора, файлы не трогаем", true),
+}
+
+data class LaunchSettings(
+    val moviesDirectory: Path,
+    val mode: WorkMode,
+)
+
+enum class PlanStatus(val canApply: Boolean, val displayName: String) {
+    READY(true, "можно сделать"),
+    ALREADY_OK(false, "уже в нужном виде"),
+    UNCLEAR(false, "не поняли, как назвать"),
+    BLOCKED(false, "не получится"),
+}
+
+data class RenamePlan(
+    val file: Path,
+    val media: MediaInfo,
+    val proposedName: String,
+    val status: PlanStatus,
+    val reasons: List<String>,
+) {
+    val target: Path? = file.parent?.resolve(proposedName)
+}
 
 enum class MediaType(val displayName: String) {
     MOVIE("Фильм"),
     TV_EPISODE("Эпизод сериала"),
 }
 
+// 0001.03 Поля, которые вытащили из имени файла. Пустые — null / пустой список.
 data class MediaInfo(
     val mediaType: MediaType,
     val title: String,
@@ -119,9 +177,9 @@ data class MediaInfo(
     val languages: List<String>,
 )
 
-// -----------------------------------------------------------------------------
-// Console / Unicode
-// -----------------------------------------------------------------------------
+// =============================================================================
+// 0010  Консоль: UTF-8 везде, на Windows — WriteConsoleW
+// =============================================================================
 
 object Console {
     private val lock = Any()
@@ -164,6 +222,7 @@ private fun utf8PrintStream(descriptor: FileDescriptor): PrintStream {
     return PrintStream(FileOutputStream(descriptor), true, StandardCharsets.UTF_8)
 }
 
+// 0010.01 Реальная cmd/PowerShell: байты UTF-8 туда писать нельзя, только UTF-16.
 private object WindowsStdio {
     private const val STD_OUTPUT_HANDLE = -11
     private const val STD_ERROR_HANDLE = -12
@@ -177,6 +236,7 @@ private object WindowsStdio {
             bindHandle(kernel32, STD_OUTPUT_HANDLE, FileDescriptor.out) to
                 bindHandle(kernel32, STD_ERROR_HANDLE, FileDescriptor.err)
         } catch (_: Throwable) {
+            // 0010.02 Студия и пайпы — не консоль, достаточно UTF-8 в поток.
             utf8PrintStream(FileDescriptor.out) to utf8PrintStream(FileDescriptor.err)
         }
     }
@@ -275,29 +335,80 @@ private class WindowsConsoleOutputStream(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Scanner
-// -----------------------------------------------------------------------------
+// =============================================================================
+// 0100  Библиотека: защита файлов, обход, парсер имени, отчёт
+// =============================================================================
 
-object VideoScanner {
-    fun findVideoFiles(directory: Path): List<Path> {
-        return Files.walk(directory).use { paths ->
+object FileGuard {
+    fun libraryRoot(directory: Path): Path {
+        return directory.toAbsolutePath().normalize()
+    }
+
+    // 0100.01 Путь обязан остаться внутри корня. Защита от ../ и симлинков наружу.
+    fun isInside(library: Path, path: Path): Boolean {
+        val root = libraryRoot(library)
+        val candidate = path.toAbsolutePath().normalize()
+        return candidate.startsWith(root)
+    }
+
+    fun listRegularFiles(library: Path): List<Path> {
+        val root = libraryRoot(library)
+        return Files.walk(root).use { paths ->
             paths.asSequence()
-                .filter { it.isRegularFile() }
-                .filter { it.extension.lowercase() in Config.videoExtensions }
-                .sortedBy { it.toString().lowercase() }
+                .filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
+                .filter { isInside(root, it) }
                 .toList()
         }
     }
+
+    fun rename(library: Path, from: Path, to: Path) {
+        val (source, target) = prepareMutation(library, from, to)
+        Files.move(source, target)
+    }
+
+    fun copy(library: Path, from: Path, to: Path) {
+        val (source, target) = prepareMutation(library, from, to)
+        Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS)
+    }
+
+    // 0100.02 Единственные мутации: move или copy. Delete нет и не будет.
+    private fun prepareMutation(library: Path, from: Path, to: Path): Pair<Path, Path> {
+        val root = libraryRoot(library)
+        val source = from.toAbsolutePath().normalize()
+        val target = to.toAbsolutePath().normalize()
+
+        check(isInside(root, source) && isInside(root, target)) {
+            "Операция только внутри библиотеки: $root"
+        }
+        check(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
+            "Источник не обычный файл: $source"
+        }
+        check(source.parent == target.parent) {
+            "Пока только новое имя в той же папке, без переноса"
+        }
+        check(source != target) {
+            "Новое имя совпадает со старым"
+        }
+        check(!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            "Не перезаписываем существующий файл: $target"
+        }
+
+        return source to target
+    }
 }
 
-// -----------------------------------------------------------------------------
-// Parser
-// -----------------------------------------------------------------------------
+object VideoScanner {
+    fun findVideoFiles(directory: Path): List<Path> {
+        return FileGuard.listRegularFiles(directory)
+            .filter { it.extension.lowercase() in Config.videoExtensions }
+            .sortedBy { it.toString().lowercase() }
+    }
+}
 
 object MediaParser {
     private val asciiFlags = setOf(RegexOption.IGNORE_CASE)
 
+    // 0100.03 Граница ASCII-токена: «Дюна2021» и «СериалS01E01» всё ещё режутся верно.
     private const val ASCII_START = """(?<![A-Za-z0-9])"""
     private const val ASCII_END = """(?![A-Za-z0-9])"""
 
@@ -331,11 +442,13 @@ object MediaParser {
 
     fun parse(path: Path): MediaInfo {
         val originalName = normalizeUnicode(path.nameWithoutExtension)
+        // 0100.03.01 [1080p] в начале часто выкидывают до поиска тегов — запоминаем.
         val leadingResolution = leadingResolutionRegex.find(originalName)?.groupValues?.getOrNull(1)
         val fileName = normalizeReleaseName(originalName)
         val parentName = normalizeReleaseName(path.parent?.fileName?.toString().orEmpty())
         val seasonEpisodeMatch = seasonEpisodeRegex.find(fileName)
         val isTvEpisode = seasonEpisodeMatch != null
+        // 0100.03.02 У серии год/качество иногда только в папке сериала.
         val metadataText = if (isTvEpisode) "$fileName $parentName" else fileName
 
         return MediaInfo(
@@ -363,6 +476,7 @@ object MediaParser {
         )
     }
 
+    // 0100.03.03 Название — всё до первого тега (год, SxxExx, 1080p, WEB-DL, …).
     private fun extractMovieTitle(fileName: String): String {
         return fileName
             .substring(0, findFirstMetadataIndex(fileName))
@@ -412,6 +526,7 @@ object MediaParser {
         ).minOrNull() ?: value.length
     }
 
+    // 0100.03.04 NFC + тире/точки/пробелы к одному виду, чтобы regex не путались.
     private fun normalizeReleaseName(value: String): String {
         return normalizeUnicode(value)
             .replace(leadingResolutionRegex, "")
@@ -490,28 +605,129 @@ private fun String.trimReleaseSeparators(): String {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Report
-// -----------------------------------------------------------------------------
+object NameFormatter {
+    fun fileName(media: MediaInfo, extension: String): String {
+        val stem = when (media.mediaType) {
+            MediaType.MOVIE -> movieStem(media)
+            MediaType.TV_EPISODE -> episodeStem(media)
+        }
+        return sanitize("$stem.$extension")
+    }
 
-object MediaPrinter {
-    fun print(index: Int, file: Path, media: MediaInfo) {
-        println("==================================================")
-        println("${index + 1}. ${file.fileName}")
-        println("Полный путь: $file")
-        println("Тип: ${media.mediaType.displayName}")
-        println("Название: ${media.title}")
-        println("Год: ${media.year ?: "не найден"}")
+    private fun movieStem(media: MediaInfo): String {
+        return buildList {
+            add(media.title)
+            media.year?.let { add("($it)") }
+            media.resolution?.let(::add)
+            media.source?.let(::add)
+            addAll(media.editions)
+            if (media.languages.isNotEmpty()) {
+                add(media.languages.joinToString(" "))
+            }
+        }.joinToString(" ")
+    }
 
-        if (media.mediaType == MediaType.TV_EPISODE) {
-            println("Сезон: ${media.season ?: "не найден"}")
-            println("Эпизод: ${media.episode ?: "не найден"}")
-            println("Название эпизода: ${media.episodeTitle ?: "не найдено"}")
+    private fun episodeStem(media: MediaInfo): String {
+        val code = "S%02dE%02d".format(media.season ?: 0, media.episode ?: 0)
+        return buildList {
+            add(media.title)
+            add(code)
+            media.episodeTitle?.let(::add)
+            media.resolution?.let(::add)
+            media.source?.let(::add)
+        }.joinToString(" ")
+    }
+
+    // 0100.05 Символы, которые Windows не берёт в имя файла.
+    private fun sanitize(value: String): String {
+        return value
+            .replace(Regex("""[<>:"/\\|?*\u0000-\u001F]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim(' ', '.')
+    }
+}
+
+object RenamePlanner {
+    fun planAll(library: Path, files: List<Path>): List<RenamePlan> {
+        val reserved = mutableSetOf<Path>()
+        return files.map { file ->
+            val plan = planOne(library, file, reserved)
+            plan.target?.let(reserved::add)
+            plan
+        }
+    }
+
+    // 0100.06 Переименовываем только если хватает названия и года / SxxExx.
+    private fun planOne(library: Path, file: Path, reserved: Set<Path>): RenamePlan {
+        val media = MediaParser.parse(file)
+        val proposedName = NameFormatter.fileName(media, file.extension.lowercase())
+        val target = file.parent?.resolve(proposedName)
+        val reasons = mutableListOf<String>()
+
+        if (media.title.isBlank() || media.title == "Название не определено") {
+            reasons += "нет названия"
+        }
+        when (media.mediaType) {
+            MediaType.MOVIE -> if (media.year == null) reasons += "нет года"
+            MediaType.TV_EPISODE -> {
+                if (media.season == null) reasons += "нет сезона"
+                if (media.episode == null) reasons += "нет эпизода"
+            }
         }
 
-        println("Разрешение: ${media.resolution ?: "не найдено"}")
-        println("Источник: ${media.source ?: "не найден"}")
-        println("Версия: ${media.editions.ifEmpty { listOf("не найдена") }.joinToString()}")
-        println("Языки: ${media.languages.ifEmpty { listOf("не найдены") }.joinToString()}")
+        val status = when {
+            reasons.isNotEmpty() -> PlanStatus.UNCLEAR
+            proposedName.equals(file.fileName.toString(), ignoreCase = false) -> PlanStatus.ALREADY_OK
+            target == null -> {
+                reasons += "нет папки у файла"
+                PlanStatus.BLOCKED
+            }
+            !FileGuard.isInside(library, target) -> {
+                reasons += "цель вне библиотеки"
+                PlanStatus.BLOCKED
+            }
+            Files.exists(target, LinkOption.NOFOLLOW_LINKS) || target in reserved -> {
+                reasons += "файл с таким именем уже есть"
+                PlanStatus.BLOCKED
+            }
+            else -> PlanStatus.READY
+        }
+
+        return RenamePlan(
+            file = file,
+            media = media,
+            proposedName = proposedName,
+            status = status,
+            reasons = reasons,
+        )
+    }
+}
+
+object MediaPrinter {
+    fun print(index: Int, plan: RenamePlan, mode: WorkMode) {
+        val media = plan.media
+        println("==================================================")
+        println("${index + 1}. ${plan.file.fileName}")
+        println("Статус: ${plan.status.displayName}")
+        println("Новое имя: ${plan.proposedName}")
+        if (plan.reasons.isNotEmpty()) {
+            println("Почему: ${plan.reasons.joinToString("; ")}")
+        }
+
+        if (mode == WorkMode.DEBUG) {
+            println("Полный путь: ${plan.file}")
+            println("Тип: ${media.mediaType.displayName}")
+            println("Название: ${media.title}")
+            println("Год: ${media.year ?: "не найден"}")
+            if (media.mediaType == MediaType.TV_EPISODE) {
+                println("Сезон: ${media.season ?: "не найден"}")
+                println("Эпизод: ${media.episode ?: "не найден"}")
+                println("Название эпизода: ${media.episodeTitle ?: "не найдено"}")
+            }
+            println("Разрешение: ${media.resolution ?: "не найдено"}")
+            println("Источник: ${media.source ?: "не найден"}")
+            println("Версия: ${media.editions.ifEmpty { listOf("не найдена") }.joinToString()}")
+            println("Языки: ${media.languages.ifEmpty { listOf("не найдены") }.joinToString()}")
+        }
     }
 }

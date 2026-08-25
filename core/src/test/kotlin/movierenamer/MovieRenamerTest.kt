@@ -5,7 +5,9 @@ import java.nio.file.Path
 import java.text.Normalizer
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class MovieRenamerTest {
 
@@ -101,6 +103,98 @@ class MovieRenamerTest {
         } finally {
             Files.deleteIfExists(video)
             Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun `file guard does not treat paths outside the library as inside`() {
+        val library = Files.createTempDirectory("library-")
+        val outside = Files.createTempDirectory("outside-")
+        try {
+            val inside = library.resolve("фильм.mkv")
+            Files.createFile(inside)
+
+            assertTrue(FileGuard.isInside(library, inside))
+            assertFalse(FileGuard.isInside(library, outside.resolve("чужой.mkv")))
+        } finally {
+            Files.deleteIfExists(library.resolve("фильм.mkv"))
+            Files.deleteIfExists(library)
+            Files.deleteIfExists(outside)
+        }
+    }
+
+    @Test
+    fun `file guard renames inside the library and never deletes the file`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("old.mkv")
+        Files.writeString(video, "media")
+        val renamed = library.resolve("new.mkv")
+        try {
+            FileGuard.rename(library, video, renamed)
+            assertFalse(Files.exists(video))
+            assertEquals("media", Files.readString(renamed))
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(renamed)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `file guard copies with a new name and keeps the original`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("old.mkv")
+        Files.writeString(video, "media")
+        val copy = library.resolve("new.mkv")
+        try {
+            FileGuard.copy(library, video, copy)
+            assertEquals("media", Files.readString(video))
+            assertEquals("media", Files.readString(copy))
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(copy)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `formats a movie target name`() {
+        val media = MediaParser.parse(
+            Path.of("The.Matrix.1999.1080p.BluRay.x264.RUS.ENG.mkv"),
+        )
+        assertEquals(
+            "The Matrix (1999) 1080p BluRay RU EN.mkv",
+            NameFormatter.fileName(media, "mkv"),
+        )
+    }
+
+    @Test
+    fun `preview marks a movie as ready when title and year are known`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("The.Matrix.1999.1080p.BluRay.mkv")
+        Files.createFile(video)
+        try {
+            val plan = RenamePlanner.planAll(library, listOf(video)).single()
+            assertEquals(PlanStatus.READY, plan.status)
+            assertEquals("The Matrix (1999) 1080p BluRay.mkv", plan.proposedName)
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `preview rejects a file without a year as unclear`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("random-clip.mkv")
+        Files.createFile(video)
+        try {
+            val plan = RenamePlanner.planAll(library, listOf(video)).single()
+            assertEquals(PlanStatus.UNCLEAR, plan.status)
+            assertTrue(plan.reasons.any { it.contains("года") })
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(library)
         }
     }
 }
