@@ -8,6 +8,7 @@ kotlin {
 
 dependencies {
     implementation(libs.jna)
+    implementation(libs.kotlinx.serialization.json)
     testImplementation(kotlin("test"))
 }
 

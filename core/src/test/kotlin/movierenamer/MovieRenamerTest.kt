@@ -197,4 +197,19 @@ class MovieRenamerTest {
             Files.deleteIfExists(library)
         }
     }
+
+    @Test
+    fun `catalog prefers the title with the matching year`() {
+        val local = MediaParser.parse(Path.of("The.Matrix.1999.1080p.mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit("iTunes", "The Matrix Reloaded", 2003, null),
+                CatalogHit("iTunes", "The Matrix", 1999, null),
+                CatalogHit("Wikipedia (en)", "Matrix (mathematics)", 2020, null),
+            ),
+        )
+        assertEquals("The Matrix", hit?.title)
+        assertEquals(1999, hit?.year)
+    }
 }

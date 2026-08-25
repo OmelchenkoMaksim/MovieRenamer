@@ -9,6 +9,11 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.io.PrintStream
+import java.net.URI
+import java.net.URLEncoder
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CharsetDecoder
@@ -19,30 +24,40 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.text.Normalizer
+import java.time.Duration
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import kotlin.io.path.extension
 import kotlin.io.path.isDirectory
 import kotlin.io.path.nameWithoutExtension
 import kotlin.streams.asSequence
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 // =============================================================================
-// 0000  Старт: консоль → папка → скан → разбор имени → печать
+// 0000  Старт: терминал → папка → скан → каталоги → разбор имени → печать
 // =============================================================================
 
 object MovieRenamer {
     fun run(settings: LaunchSettings) {
         // 0000.01 Иначе кириллица в консоли Windows поедет.
-        Console.install()
+        Talk.install()
 
         val moviesDirectory = settings.moviesDirectory.toAbsolutePath().normalize()
 
-        Console.info("Запуск Movie Renamer")
-        Console.info("Режим: ${settings.mode.displayName}")
-        Console.info("Рабочая директория: $moviesDirectory")
+        Talk.info("Запуск Movie Renamer")
+        Talk.info("Режим: ${settings.mode.displayName}")
+        Talk.info("Рабочая директория: $moviesDirectory")
+        if (settings.lookupOnline) {
+            Talk.info("Онлайн-поиск: iTunes, TVMaze, Wikipedia")
+        }
 
         if (!moviesDirectory.isDirectory()) {
-            Console.error("Директория не найдена: $moviesDirectory")
+            Talk.error("Директория не найдена: $moviesDirectory")
             return
         }
 
@@ -50,20 +65,20 @@ object MovieRenamer {
         val videoFiles = try {
             VideoScanner.findVideoFiles(moviesDirectory)
         } catch (exception: Exception) {
-            Console.error("Ошибка сканирования: ${exception.message}")
+            Talk.error("Ошибка сканирования: ${exception.message}")
             return
         }
 
         if (videoFiles.isEmpty()) {
-            Console.info("В директории нет поддерживаемых видеофайлов")
+            Talk.info("В директории нет поддерживаемых видеофайлов")
             return
         }
 
-        Console.info("Найдено файлов: ${videoFiles.size}")
+        Talk.info("Найдено файлов: ${videoFiles.size}")
         println()
 
         // 0000.04 Сначала план на все файлы, потом действие. Так не столкнёмся именами.
-        val plans = RenamePlanner.planAll(moviesDirectory, videoFiles)
+        val plans = RenamePlanner.planAll(moviesDirectory, videoFiles, settings.lookupOnline)
         var applied = 0
         var skipped = 0
         var failed = 0
@@ -83,7 +98,7 @@ object MovieRenamer {
                         applyPlan(settings.mode, moviesDirectory, plan)
                         applied++
                     } catch (exception: Exception) {
-                        Console.error("Не удалось обработать ${plan.file.fileName}: ${exception.message}")
+                        Talk.error("Не удалось обработать ${plan.file.fileName}: ${exception.message}")
                         failed++
                     }
                 }
@@ -91,13 +106,13 @@ object MovieRenamer {
         }
 
         println()
-        Console.info("Готово")
-        Console.info("Можно сделать: ${plans.count { it.status.canApply }}")
-        Console.info("Не получится / не нужно: ${plans.count { !it.status.canApply }}")
+        Talk.info("Готово")
+        Talk.info("Можно сделать: ${plans.count { it.status.canApply }}")
+        Talk.info("Не получится / не нужно: ${plans.count { !it.status.canApply }}")
         if (settings.mode.isReadOnly) {
-            Console.info("Файлы не изменялись")
+            Talk.info("Файлы не изменялись")
         } else {
-            Console.info("Сделано: $applied, пропущено: $skipped, ошибок: $failed")
+            Talk.info("Сделано: $applied, пропущено: $skipped, ошибок: $failed")
         }
     }
 
@@ -139,6 +154,7 @@ enum class WorkMode(val displayName: String, val isReadOnly: Boolean) {
 data class LaunchSettings(
     val moviesDirectory: Path,
     val mode: WorkMode,
+    val lookupOnline: Boolean,
 )
 
 enum class PlanStatus(val canApply: Boolean, val displayName: String) {
@@ -154,6 +170,7 @@ data class RenamePlan(
     val proposedName: String,
     val status: PlanStatus,
     val reasons: List<String>,
+    val catalog: CatalogHit? = null,
 ) {
     val target: Path? = file.parent?.resolve(proposedName)
 }
@@ -164,6 +181,13 @@ enum class MediaType(val displayName: String) {
 }
 
 // 0001.03 Поля, которые вытащили из имени файла. Пустые — null / пустой список.
+data class CatalogHit(
+    val site: String,
+    val title: String,
+    val year: Int?,
+    val pageUrl: String?,
+)
+
 data class MediaInfo(
     val mediaType: MediaType,
     val title: String,
@@ -178,10 +202,10 @@ data class MediaInfo(
 )
 
 // =============================================================================
-// 0010  Консоль: UTF-8 везде, на Windows — WriteConsoleW
+// 0010  Talk: пишем человеку в терминал, UTF-8, на Windows — WriteConsoleW
 // =============================================================================
 
-object Console {
+object Talk {
     private val lock = Any()
     private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
@@ -648,18 +672,29 @@ object NameFormatter {
 }
 
 object RenamePlanner {
-    fun planAll(library: Path, files: List<Path>): List<RenamePlan> {
+    fun planAll(
+        library: Path,
+        files: List<Path>,
+        lookupOnline: Boolean = false,
+    ): List<RenamePlan> {
         val reserved = mutableSetOf<Path>()
         return files.map { file ->
-            val plan = planOne(library, file, reserved)
+            val plan = planOne(library, file, reserved, lookupOnline)
             plan.target?.let(reserved::add)
             plan
         }
     }
 
     // 0100.06 Переименовываем только если хватает названия и года / SxxExx.
-    private fun planOne(library: Path, file: Path, reserved: Set<Path>): RenamePlan {
-        val media = MediaParser.parse(file)
+    private fun planOne(
+        library: Path,
+        file: Path,
+        reserved: Set<Path>,
+        lookupOnline: Boolean,
+    ): RenamePlan {
+        val parsed = MediaParser.parse(file)
+        val catalog = if (lookupOnline) TitleCatalog.find(parsed) else null
+        val media = parsed.withCatalog(catalog)
         val proposedName = NameFormatter.fileName(media, file.extension.lowercase())
         val target = file.parent?.resolve(proposedName)
         val reasons = mutableListOf<String>()
@@ -699,6 +734,7 @@ object RenamePlanner {
             proposedName = proposedName,
             status = status,
             reasons = reasons,
+            catalog = catalog,
         )
     }
 }
@@ -712,6 +748,9 @@ object MediaPrinter {
         println("Новое имя: ${plan.proposedName}")
         if (plan.reasons.isNotEmpty()) {
             println("Почему: ${plan.reasons.joinToString("; ")}")
+        }
+        plan.catalog?.let { hit ->
+            println("Каталог: ${hit.site} — ${hit.title}${hit.year?.let { " ($it)" } ?: ""}")
         }
 
         if (mode == WorkMode.DEBUG) {
@@ -728,6 +767,186 @@ object MediaPrinter {
             println("Источник: ${media.source ?: "не найден"}")
             println("Версия: ${media.editions.ifEmpty { listOf("не найдена") }.joinToString()}")
             println("Языки: ${media.languages.ifEmpty { listOf("не найдены") }.joinToString()}")
+            plan.catalog?.pageUrl?.let { println("Страница: $it") }
         }
+    }
+}
+
+private fun MediaInfo.withCatalog(hit: CatalogHit?): MediaInfo {
+    if (hit == null) return this
+    return copy(
+        title = hit.title.ifBlank { title },
+        year = year ?: hit.year,
+    )
+}
+
+// =============================================================================
+// 1000  Интернет: открытые каталоги названий, без ключей
+// =============================================================================
+
+object TitleCatalog {
+    private val json = Json { ignoreUnknownKeys = true }
+    private val cache = mutableMapOf<String, CatalogHit?>()
+    private val http: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(8))
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build()
+
+    fun find(media: MediaInfo): CatalogHit? {
+        if (media.title.isBlank() || media.title == "Название не определено") {
+            return null
+        }
+        val cacheKey = "${media.mediaType}|${media.title.lowercase()}|${media.year}"
+        return cache.getOrPut(cacheKey) {
+            val hits = buildList {
+                addAll(searchItunes(media))
+                if (media.mediaType == MediaType.TV_EPISODE) {
+                    addAll(searchTvMaze(media))
+                }
+                addAll(searchWikipedia(media, "ru"))
+                addAll(searchWikipedia(media, "en"))
+            }
+            pickBest(media, hits)
+        }
+    }
+
+    fun pickBest(local: MediaInfo, hits: List<CatalogHit>): CatalogHit? {
+        return hits
+            .map { it to score(local, it) }
+            .filter { it.second >= 20 }
+            .maxByOrNull { it.second }
+            ?.first
+    }
+
+    private fun score(local: MediaInfo, hit: CatalogHit): Int {
+        val a = foldTitle(local.title)
+        val b = foldTitle(hit.title)
+        if (a.isBlank() || b.isBlank()) return -1
+
+        var points = 0
+        when {
+            a == b -> points += 50
+            b.contains(a) || a.contains(b) -> points += 30
+            else -> {
+                val words = a.split(" ").filter { it.length > 2 }
+                val matched = words.count { it in b }
+                if (matched == 0) return -1
+                points += matched * 8
+            }
+        }
+
+        if (local.year != null && hit.year != null) {
+            val delta = kotlin.math.abs(local.year - hit.year)
+            points += when {
+                delta == 0 -> 25
+                delta == 1 -> 10
+                else -> -20
+            }
+        }
+        return points
+    }
+
+    private fun foldTitle(value: String): String {
+        return value.lowercase()
+            .replace(Regex("""[^\p{L}\p{N}\s]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+    }
+
+    private fun searchItunes(media: MediaInfo): List<CatalogHit> {
+        val entity = if (media.mediaType == MediaType.TV_EPISODE) "tvSeason" else "movie"
+        val query = listOfNotNull(media.title, media.year?.toString()).joinToString(" ")
+        val url = "https://itunes.apple.com/search?term=${enc(query)}&entity=$entity&limit=5"
+        val body = get(url) ?: return emptyList()
+        return runCatching {
+            val results = json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
+            results.mapNotNull { element ->
+                val item = element.jsonObject
+                val title = item.str("trackName")
+                    ?: item.str("collectionName")
+                    ?: item.str("artistName")
+                    ?: return@mapNotNull null
+                CatalogHit(
+                    site = "iTunes",
+                    title = title,
+                    year = yearOf(item.str("releaseDate")),
+                    pageUrl = item.str("trackViewUrl") ?: item.str("collectionViewUrl"),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun searchTvMaze(media: MediaInfo): List<CatalogHit> {
+        val url = "https://api.tvmaze.com/search/shows?q=${enc(media.title)}"
+        val body = get(url) ?: return emptyList()
+        return runCatching {
+            json.parseToJsonElement(body).jsonArray.mapNotNull { element ->
+                val show = element.jsonObject["show"]?.jsonObject ?: return@mapNotNull null
+                val title = show.str("name") ?: return@mapNotNull null
+                CatalogHit(
+                    site = "TVMaze",
+                    title = title,
+                    year = yearOf(show.str("premiered")),
+                    pageUrl = show.str("url"),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun searchWikipedia(media: MediaInfo, lang: String): List<CatalogHit> {
+        val query = listOfNotNull(media.title, media.year?.toString()).joinToString(" ")
+        val url = "https://$lang.wikipedia.org/w/api.php?action=opensearch&search=${enc(query)}&limit=5&format=json"
+        val body = get(url) ?: return emptyList()
+        return runCatching {
+            val root = json.parseToJsonElement(body).jsonArray
+            val titles = root.getOrNull(1)?.jsonArray.orEmpty()
+            val descriptions = root.getOrNull(2)?.jsonArray.orEmpty()
+            val urls = root.getOrNull(3)?.jsonArray.orEmpty()
+            titles.mapIndexed { index, element ->
+                val rawTitle = element.jsonPrimitive.content
+                val description = descriptions.getOrNull(index)?.jsonPrimitive?.contentOrNull.orEmpty()
+                CatalogHit(
+                    site = "Wikipedia ($lang)",
+                    title = stripWikiSuffix(rawTitle),
+                    year = yearOf(description) ?: yearOf(rawTitle),
+                    pageUrl = urls.getOrNull(index)?.jsonPrimitive?.contentOrNull,
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun stripWikiSuffix(title: String): String {
+        return title
+            .replace(
+                Regex("""\s*\((film|movie|сериал|фильм|TV series|television series).*?\)$""", RegexOption.IGNORE_CASE),
+                "",
+            )
+            .trim()
+    }
+
+    private fun yearOf(value: String?): Int? {
+        return value?.let { Regex("""\b(19\d{2}|20\d{2})\b""").find(it)?.value?.toIntOrNull() }
+    }
+
+    private fun JsonObject.str(key: String): String? {
+        return runCatching { this[key]?.jsonPrimitive?.contentOrNull }.getOrNull()
+    }
+
+    private fun enc(value: String): String {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8)
+    }
+
+    private fun get(url: String): String? {
+        return runCatching {
+            Thread.sleep(120)
+            val request = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .header("Accept", "application/json")
+                .header("User-Agent", "MovieRenamer/1.0 (home media library; title lookup)")
+                .GET()
+                .build()
+            val response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            if (response.statusCode() in 200..299) response.body() else null
+        }.getOrNull()
     }
 }

@@ -12,11 +12,16 @@ private val workMode: WorkMode = WorkMode.PREVIEW
 // WorkMode.COPY    — оригинал оставить, копия с новым именем, если поняли
 // WorkMode.DEBUG   — как PREVIEW, плюс сырой разбор каждого файла
 
+private val lookupOnline: Boolean = true
+// true  — уточняем название в iTunes, TVMaze и Wikipedia
+// false — только имя файла, без интернета
+
 fun main() {
     MovieRenamer.run(
         LaunchSettings(
             moviesDirectory = moviesDirectory,
             mode = workMode,
+            lookupOnline = lookupOnline,
         ),
     )
 }
