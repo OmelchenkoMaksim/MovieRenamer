@@ -59,6 +59,7 @@ This product uses the TMDB API but is not endorsed or certified by TMDB.
 ```
 
 По умолчанию включён безопасный режим `DEBUG`: читается `debug/samples`, копии
-создаются в `debug/results`. Если имена получились кривые, поставьте
+создаются в `debug/results`. Онлайн-поиск и токены TMDB/ПоискКино в DEBUG
+работают так же, как при обычном запуске. Если имена получились кривые, поставьте
 `WorkMode.REVERT` в `Main.kt` — файлы вернутся к именам из кэша последнего
 переименования.

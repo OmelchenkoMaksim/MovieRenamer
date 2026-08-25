@@ -61,6 +61,7 @@ object MovieRenamer {
             return
         }
 
+        val lookupOnline = settings.lookupOnline || settings.mode == WorkMode.DEBUG
         val debug = settings.mode == WorkMode.DEBUG
         val moviesDirectory = if (debug) {
             Config.debugSamples.toAbsolutePath().normalize()
@@ -79,7 +80,7 @@ object MovieRenamer {
         if (settings.mode == WorkMode.DEBUG) {
             Talk.info("Исходники debug не трогаем. Результат: ${resultsDirectory ?: "не задан"}")
         }
-        if (settings.lookupOnline) {
+        if (lookupOnline) {
             val catalogs = buildList {
                 if (TitleCatalog.isTmdbConfigured()) add("TMDB")
                 if (TitleCatalog.isPoiskKinoConfigured()) add("ПоискКино")
@@ -151,7 +152,7 @@ object MovieRenamer {
         Talk.info("Найдено файлов: ${videoFiles.size}")
         println()
 
-        val plans = RenamePlanner.planAll(moviesDirectory, videoFiles, settings.lookupOnline)
+        val plans = RenamePlanner.planAll(moviesDirectory, videoFiles, lookupOnline)
         val errors = mutableListOf<FileIssue>()
         var changed = 0
         var writtenResults = 0
