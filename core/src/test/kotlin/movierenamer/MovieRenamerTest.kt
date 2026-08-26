@@ -1240,6 +1240,24 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `printer shows catalog note when several years match without a year`() {
+        val media = MediaParser.parse(Path.of("The.Father.BDRip.1080p.HD.m4v"))
+        val plan = RenamePlan(
+            file = Path.of("The.Father.BDRip.1080p.HD.m4v"),
+            media = media,
+            proposedName = "The Father.m4v",
+            status = PlanStatus.UNCLEAR,
+            reasons = listOf("нет года"),
+            catalog = null,
+            note = "без года подходит несколько — The Father (2020); The Father (1979). Допишите год в имя файла",
+        )
+        val output = captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
+        assertTrue(output.contains("Название: The Father"))
+        assertTrue(output.contains("Допишите год"))
+        assertFalse(output.contains("Новое имя:"))
+    }
+
+    @Test
     fun `revert cache merge keeps pairs from the previous run`() {
         val cache = Files.createTempFile("revert-cache-", ".json")
         val library = Files.createTempDirectory("library-")

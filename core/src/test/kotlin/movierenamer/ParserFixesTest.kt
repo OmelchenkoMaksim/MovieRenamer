@@ -173,6 +173,87 @@ class ParserFixesTest {
         assertTrue(TitleCatalog.shortenedQueries("Брат").isEmpty())
     }
 
+    @Test
+    fun `1080 без p это разрешение а не часть названия`() {
+        val media = MediaParser.parse(Path.of("movies", "12 стульев.1080.mkv"))
+        assertEquals("12 стульев", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `HDTVRip и хвост трекера не лезут в название`() {
+        val media = MediaParser.parse(
+            Path.of(
+                "Ace_Ventura_Pet_Detective_HDTVRip_1080p_DVD9_DXVA_DIMAPIKS[torrents.ru].mkv",
+            ),
+        )
+        assertEquals("Ace Ventura Pet Detective", media.title)
+        assertEquals("1080p", media.resolution)
+        assertEquals("HDTVRip", media.source)
+    }
+
+    @Test
+    fun `сцена-группа в конце не часть названия`() {
+        val media = MediaParser.parse(Path.of("Клик с пультом hns-cl.mkv"))
+        assertEquals("Клик с пультом", media.title)
+    }
+
+    @Test
+    fun `X-Men в конце имени не снимается как группа`() {
+        val media = MediaParser.parse(Path.of("X-Men.mkv"))
+        assertEquals("X-Men", media.title)
+    }
+
+    @Test
+    fun `The Father режется по источнику`() {
+        val media = MediaParser.parse(Path.of("The.Father.BDRip.1080p.HD.m4v"))
+        assertEquals("The Father", media.title)
+        assertEquals("BDRip", media.source)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `Клик с пультом без года совпадает с полным русским названием`() {
+        val click = hit(title = "Клик: С пультом по жизни", year = 2006, id = 1)
+        assertSame(click, TitleCatalog.pickBest(movie(title = "Клик с пультом", year = null), listOf(click)))
+    }
+
+    @Test
+    fun `The Father без года не берёт The Father of the Bride`() {
+        val bride = hit(title = "The Father of the Bride", year = 1991, id = 2)
+        assertNull(TitleCatalog.pickBest(movie(title = "The Father", year = null), listOf(bride)))
+    }
+
+    @Test
+    fun `The Father без года и два фильма это отказ`() {
+        assertNull(
+            TitleCatalog.pickBest(
+                movie(title = "The Father", year = null),
+                listOf(
+                    hit(title = "The Father", year = 2020, id = 1),
+                    hit(title = "The Father", year = 1979, id = 2),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `две версии 12 стульев без года это отказ с подсказкой`() {
+        val local = movie(title = "12 стульев", year = null)
+        assertNull(
+            TitleCatalog.pickBest(
+                local,
+                listOf(
+                    hit(title = "12 стульев", year = 1971, id = 1),
+                    hit(title = "12 стульев", year = 1976, id = 2),
+                ),
+            ),
+        )
+        val note = TitleCatalog.noteFor(local)
+        assertTrue(note != null && "1971" in note && "1976" in note, "нет подсказки с годами: $note")
+    }
+
     private fun assertMatches(fromFile: String, fromCatalog: String) {
         val left = TitleCatalog.titleKeys(fromFile)
         val right = TitleCatalog.titleKeys(fromCatalog)

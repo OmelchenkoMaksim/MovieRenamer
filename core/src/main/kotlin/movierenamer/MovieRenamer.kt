@@ -860,20 +860,30 @@ object MediaParser {
     private val seasonEpisodeRegex = Regex("""${ASCII_START}S(\d{1,2})E(\d{1,3})$ASCII_END""", asciiFlags)
     private val seasonRegex = Regex("""${ASCII_START}S\d{1,2}$ASCII_END""", asciiFlags)
     private val resolutionRegex = Regex(
-        """$ASCII_START(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|2K|4K|UHD|FullHD)$ASCII_END""",
+        """$ASCII_START(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|480|720|1080|2160|2K|4K|UHD|FullHD)$ASCII_END""",
         asciiFlags,
     )
     private val leadingResolutionRegex = Regex(
-        """^[\p{Zs}\s]*\[(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|2K|4K|UHD|FullHD)\][\p{Zs}\s]*""",
+        """^[\p{Zs}\s]*\[(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|480|720|1080|2160|2K|4K|UHD|FullHD)\][\p{Zs}\s]*""",
         asciiFlags,
     )
     private val sourceRegex = Regex(
-        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV|4KRIP|UHDRIP|BDREMUX|DVDREMUX|REMUX|CAMRIP|SATRIP)$ASCII_END""",
+        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV(?:[ .\-\p{Pd}]?RIP)?|4KRIP|UHDRIP|BDREMUX|DVDREMUX|REMUX|CAMRIP|SATRIP)$ASCII_END""",
+        asciiFlags,
+    )
+    private val techTagRegex = Regex(
+        """$ASCII_START(DVD[59]|DXVA|AMZN|NF|IVI|X264|X265|H[.\-]?264|H[.\-]?265|HEVC|10BIT)$ASCII_END""",
         asciiFlags,
     )
     private val sitePrefixRegex = Regex(
         """^(?:www )?[\p{L}\p{N}-]+ (?:org|com|net|ru|info|tv|me|cc|biz) """,
         asciiFlags,
+    )
+    private val siteSuffixRegex = Regex(
+        """(?iu)[\s._]*[\[(](?:www[.\s])?[\p{L}\p{N}-]+\.(?:org|com|net|ru|info|tv|me|cc|biz)[\])]+$""",
+    )
+    private val trailingSceneGroupRegex = Regex(
+        """[\s._]+([A-Za-z]{2,5}-[A-Za-z0-9]{2,5}|[A-Z]{5,}|[A-Za-z]+\d{2,})$""",
     )
     // (2001), (2001г), (2001 г.)
     private val wrappedYearRegex = Regex(
@@ -1030,6 +1040,7 @@ object MediaParser {
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
             editionRegex.find(value)?.range?.first,
+            techTagRegex.find(value)?.range?.first,
         ).minOrNull() ?: value.length
     }
 
@@ -1071,12 +1082,23 @@ object MediaParser {
             .replace(wrappedYearRegex, " $1 ")
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .replace(sitePrefixRegex, "")
+            .replace(siteSuffixRegex, "")
             .let(::stripReleaseGroupSuffix)
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .trim()
     }
 
     private fun stripReleaseGroupSuffix(value: String): String {
+        var text = value.trim('.', '_', ' ')
+        repeat(4) {
+            val next = stripReleaseGroupSuffixOnce(text)
+            if (next == text) return text
+            text = next
+        }
+        return text
+    }
+
+    private fun stripReleaseGroupSuffixOnce(value: String): String {
         val scene = sceneByGroupRegex.find(value)
         if (scene != null && looksLikeReleaseGroup(scene.groupValues[1])) {
             return value.removeRange(scene.range).trim('.', '_', ' ')
@@ -1085,7 +1107,30 @@ object MediaParser {
         if (spaced != null && looksLikeReleaseGroup(spaced.groupValues[1])) {
             return value.removeRange(spaced.range).trim('.', '_', ' ')
         }
+        val trailing = trailingSceneGroupRegex.find(value)
+        if (trailing != null && looksLikeSceneTag(trailing.groupValues[1])) {
+            return value.removeRange(trailing.range).trim('.', '_', ' ')
+        }
+        val site = siteSuffixRegex.find(value)
+        if (site != null) {
+            return value.removeRange(site.range).trim('.', '_', ' ', '[', ']')
+        }
         return value
+    }
+
+    private fun looksLikeSceneTag(token: String): Boolean {
+        if (isQualityToken(token)) return false
+        if (token.any { it.isDigit() }) return true
+        if (token.length >= 5 && token.all { it.isLetter() } && token == token.uppercase()) return true
+        if (token.contains('-') && token.none { it.isUpperCase() } && token.length <= 12) return true
+        return false
+    }
+
+    private fun isQualityToken(token: String): Boolean {
+        return resolutionRegex.containsMatchIn(token) ||
+            sourceRegex.containsMatchIn(token) ||
+            editionRegex.containsMatchIn(token) ||
+            techTagRegex.containsMatchIn(token)
     }
 
     private fun looksLikeReleaseGroup(token: String): Boolean {
@@ -1103,6 +1148,10 @@ object MediaParser {
             "UHD" -> "UHD"
             "2K" -> "2K"
             "FULLHD" -> "1080p"
+            "480" -> "480p"
+            "720" -> "720p"
+            "1080" -> "1080p"
+            "2160" -> "2160p"
             else -> value.lowercase()
         }
     }
@@ -1117,6 +1166,7 @@ object MediaParser {
             "BRRIP" -> "BRRip"
             "HDRIP" -> "HDRip"
             "DVDRIP" -> "DVDRip"
+            "HDTVRIP" -> "HDTVRip"
             "HDTV" -> "HDTV"
             "4KRIP" -> "4KRip"
             "UHDRIP" -> "UHDRip"
@@ -1480,6 +1530,10 @@ object MediaPrinter {
             if (plan.reasons.isNotEmpty()) {
                 println("Почему: ${plan.reasons.joinToString("; ")}")
             }
+            if (media.title.isNotBlank() && media.title != "Название не определено") {
+                println("Название: ${media.title}")
+            }
+            printCatalogLine(plan, lookupOnline)
             if (mode == WorkMode.DEBUG) {
                 println("Полный путь: ${plan.file}")
             }
@@ -1489,15 +1543,7 @@ object MediaPrinter {
         if (plan.reasons.isNotEmpty()) {
             println("Почему: ${plan.reasons.joinToString("; ")}")
         }
-        val hit = plan.catalog
-        if (hit != null) {
-            println("Каталог: ${hit.site} — ${hit.title}${hit.year?.let { " ($it)" } ?: ""}")
-        } else if (!plan.note.isNullOrBlank()) {
-            println("Каталог: ${plan.note}")
-        } else if (lookupOnline && media.title.isNotBlank() && media.title != "Название не определено") {
-            val year = media.year?.toString() ?: "без года"
-            println("Каталог: не нашли «${media.title}» ($year)")
-        }
+        printCatalogLine(plan, lookupOnline)
 
         if (mode == WorkMode.DEBUG) {
             println("Полный путь: ${plan.file}")
@@ -1531,6 +1577,19 @@ object MediaPrinter {
             println("Версия: ${media.editions.ifEmpty { listOf("не найдена") }.joinToString()}")
             println("Языки: ${media.languages.ifEmpty { listOf("не найдены") }.joinToString()}")
             plan.catalog?.pageUrl?.let { println("Страница: $it") }
+        }
+    }
+
+    private fun printCatalogLine(plan: RenamePlan, lookupOnline: Boolean) {
+        val media = plan.media
+        val hit = plan.catalog
+        if (hit != null) {
+            println("Каталог: ${hit.site} — ${hit.title}${hit.year?.let { " ($it)" } ?: ""}")
+        } else if (!plan.note.isNullOrBlank()) {
+            println("Каталог: ${plan.note}")
+        } else if (lookupOnline && media.title.isNotBlank() && media.title != "Название не определено") {
+            val year = media.year?.toString() ?: "без года"
+            println("Каталог: не нашли «${media.title}» ($year)")
         }
     }
 }
@@ -1772,7 +1831,8 @@ object TitleCatalog {
         val hitKeys = titleKeys(candidateTitle)
         if (localKeys.isEmpty() || hitKeys.isEmpty()) return -1
 
-        val exactTitle = localKeys.intersect(hitKeys).isNotEmpty()
+        val exactTitle = localKeys.intersect(hitKeys).isNotEmpty() ||
+            localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } }
         // Без локального года каталог может дополнить данные только при точном названии.
         if (localYear == null && !exactTitle) return -1
 
@@ -1798,6 +1858,17 @@ object TitleCatalog {
             }
         }
         return points
+    }
+
+    // «Клик с пультом» → «Клик: С пультом по жизни». Не «The Father» → «The Father of the Bride».
+    private fun isLongPrefixTitle(local: String, hit: String): Boolean {
+        if (local == hit) return true
+        if (!hit.startsWith("$local ")) return false
+        val rest = hit.removePrefix("$local ").trim()
+        if (rest.isEmpty()) return true
+        if (rest.first().isDigit()) return false
+        val localWords = local.split(" ").filter { it.isNotBlank() }
+        return localWords.size >= 3
     }
 
     private fun foldTitle(value: String): String {
