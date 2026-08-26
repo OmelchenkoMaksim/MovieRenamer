@@ -201,6 +201,32 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `catalog matches an english filename against an english TMDB title`() {
+        val local = MediaParser.parse(Path.of("Shaolin.Soccer.2001.Ch_ver.1080p.BDRip.mkv"))
+        assertEquals("Shaolin Soccer", local.title)
+        assertEquals(2001, local.year)
+
+        val russianOnly = CatalogHit(
+            "TMDB",
+            "Шаолиньский футбол",
+            2001,
+            null,
+            originalTitle = "少林足球",
+            russianTitle = "Шаолиньский футбол",
+        )
+        assertNull(TitleCatalog.pickBest(local, listOf(russianOnly)))
+
+        val englishSearch = CatalogHit(
+            "TMDB",
+            "Shaolin Soccer",
+            2001,
+            null,
+            originalTitle = "少林足球",
+        )
+        assertEquals("Shaolin Soccer", TitleCatalog.pickBest(local, listOf(englishSearch))?.title)
+    }
+
+    @Test
     fun `catalog matches a romanized russian title like brat to Брат`() {
         assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
         assertEquals(listOf("brat", "брат"), TitleCatalog.searchQueries("brat"))
@@ -328,6 +354,170 @@ class MovieRenamerTest {
         assertEquals("Breaking Bad", media.title)
         assertEquals(2, media.season)
         assertEquals(3, media.episode)
+    }
+
+    @Test
+    fun `unwraps a year with a russian suffix and leftover parentheses`() {
+        val media = MediaParser.parse(Path.of("Унесенные призраками(2001г 1080p).mkv"))
+
+        assertEquals("Унесенные призраками", media.title)
+        assertEquals(2001, media.year)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `parses a bilingual russian english release name`() {
+        val media = MediaParser.parse(
+            Path.of("Управление гневом.Anger Management.2003.BDRip.1080p.h264.Rus.Eng.mkv"),
+        )
+
+        assertEquals("Управление гневом Anger Management", media.title)
+        assertEquals(2003, media.year)
+        assertEquals("1080p", media.resolution)
+        assertEquals("BDRip", media.source)
+        assertEquals(listOf("RU", "EN"), media.languages)
+    }
+
+    @Test
+    fun `treats 4KRip as a source so it does not stick to the title`() {
+        val media = MediaParser.parse(Path.of("Особенности национальной охоты 4KRip 1080p.mkv"))
+
+        assertEquals("Особенности национальной охоты", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+        assertEquals("4KRip", media.source)
+    }
+
+    @Test
+    fun `still detects a standalone 4K resolution`() {
+        val media = MediaParser.parse(Path.of("Dune.2021.4K.mkv"))
+        assertEquals("Dune", media.title)
+        assertEquals(2021, media.year)
+        assertEquals("4K", media.resolution)
+    }
+
+    @Test
+    fun `catalog matches yo and ye as the same letter`() {
+        val local = MediaParser.parse(Path.of("Унесенные призраками(2001г 1080p).mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Унесённые призраками",
+                    2001,
+                    null,
+                    originalTitle = "千と千尋の神隠し",
+                    russianTitle = "Унесённые призраками",
+                ),
+            ),
+        )
+
+        assertEquals("Унесённые призраками", hit?.title)
+        assertEquals(2001, hit?.year)
+    }
+
+    @Test
+    fun `catalog matches either side of a bilingual filename`() {
+        val local = MediaParser.parse(
+            Path.of("Управление гневом.Anger Management.2003.BDRip.1080p.mkv"),
+        )
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Управление гневом",
+                    2003,
+                    null,
+                    originalTitle = "Anger Management",
+                    russianTitle = "Управление гневом",
+                ),
+            ),
+        )
+
+        assertEquals("Управление гневом", hit?.title)
+        assertEquals("Anger Management", hit?.originalTitle)
+        assertEquals(2003, hit?.year)
+    }
+
+    @Test
+    fun `catalog matches a bracketed russian title next to the english name`() {
+        val local = MediaParser.parse(
+            Path.of("Kung Fu Hustle [Разборки в стиле кунг-фу] (2004) BDRip.mkv"),
+        )
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Разборки в стиле кунг-фу",
+                    2004,
+                    null,
+                    originalTitle = "功夫",
+                    russianTitle = "Разборки в стиле кунг-фу",
+                ),
+            ),
+        )
+
+        assertEquals("Разборки в стиле кунг-фу", hit?.title)
+        assertTrue(TitleCatalog.searchQueries(local.title).any { it.equals("Kung Fu Hustle", ignoreCase = true) })
+        assertTrue(TitleCatalog.searchQueries(local.title).any { it.contains("Разборки") })
+    }
+
+    @Test
+    fun `catalog can supply a missing year for an exact russian title`() {
+        val local = MediaParser.parse(Path.of("Особенности национальной охоты 4KRip 1080p.mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "ПоискКино",
+                    "Особенности национальной охоты",
+                    1995,
+                    null,
+                    originalTitle = "Особенности национальной охоты",
+                    russianTitle = "Особенности национальной охоты",
+                ),
+            ),
+        )
+
+        assertEquals("Особенности национальной охоты", hit?.title)
+        assertEquals(1995, hit?.year)
+    }
+
+    @Test
+    fun `uses an english TMDB translation when the original title is not latin`() {
+        val hit = TitleCatalog.parseTmdbMovieDetails(
+            """
+            {
+              "id": 129,
+              "title": "Унесённые призраками",
+              "original_title": "千と千尋の神隠し",
+              "original_language": "ja",
+              "release_date": "2001-07-20",
+              "vote_average": 8.5,
+              "genres": [{"id": 16, "name": "мультфильм"}],
+              "credits": {
+                "cast": [{"name": "Руми Хиираги", "order": 0}],
+                "crew": [{"name": "Хаяо Миядзаки", "job": "Director"}]
+              },
+              "translations": {
+                "translations": [
+                  {
+                    "iso_639_1": "en",
+                    "data": {"title": "Spirited Away"}
+                  }
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("Унесённые призраками", hit?.russianTitle)
+        assertEquals("Spirited Away", hit?.originalTitle)
+        assertEquals(2001, hit?.year)
+        assertEquals(listOf("Хаяо Миядзаки"), hit?.directors)
     }
 
     @Test

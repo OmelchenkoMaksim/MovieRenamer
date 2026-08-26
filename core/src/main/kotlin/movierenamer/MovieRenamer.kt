@@ -804,15 +804,20 @@ object MediaParser {
         asciiFlags,
     )
     private val sourceRegex = Regex(
-        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV)$ASCII_END""",
+        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV|4KRIP|UHDRIP)$ASCII_END""",
         asciiFlags,
     )
     private val sitePrefixRegex = Regex(
         """^(?:www )?[\p{L}\p{N}-]+ (?:org|com|net|ru|info|tv|me|cc|biz) """,
         asciiFlags,
     )
+    // (2001), (2001г), (2001 г.)
     private val wrappedYearRegex = Regex(
-        """[(\[]\s*(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})\s*[)\]]""",
+        """[(\[]\s*(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})(?:\s*г(?:ода?)?\.?)?\s*[)\]]""",
+    )
+    // (2001г 1080p) — год и теги качества в одних скобках.
+    private val wrappedYearWithTagsRegex = Regex(
+        """[(\[]\s*(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})(?:\s*г(?:ода?)?\.?)?\s+([^)\]]+)[)\]]""",
     )
     private val genericFolderNames = setOf(
         "samples", "sample", "movies", "movie", "video", "videos",
@@ -987,7 +992,8 @@ object MediaParser {
             .replace('\uFF0E', ' ')
             .replace('_', ' ')
             .replace('\uFF3F', ' ')
-            .replace(wrappedYearRegex, "$1")
+            .replace(wrappedYearWithTagsRegex, " $1 $2 ")
+            .replace(wrappedYearRegex, " $1 ")
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .replace(sitePrefixRegex, "")
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
@@ -1018,6 +1024,8 @@ object MediaParser {
             "HDRIP" -> "HDRip"
             "DVDRIP" -> "DVDRip"
             "HDTV" -> "HDTV"
+            "4KRIP" -> "4KRip"
+            "UHDRIP" -> "UHDRip"
             else -> value
         }
     }
@@ -1058,7 +1066,7 @@ private fun String.trimReleaseSeparators(): String {
             char == '_' ||
             char == '-' ||
             Character.getType(char) == Character.DASH_PUNCTUATION.toInt()
-    }
+    }.trimStart(')', ']').trimEnd('(', '[')
 }
 
 object NameFormatter {
@@ -1549,20 +1557,24 @@ object TitleCatalog {
     }
 
     private fun score(local: MediaInfo, hit: CatalogHit): Int {
-        return listOfNotNull(hit.title, hit.originalTitle, hit.russianTitle)
+        val localTitles = titleVariants(local.title)
+        val hitTitles = listOfNotNull(hit.title, hit.originalTitle, hit.russianTitle)
+            .flatMap(::titleVariants)
             .distinct()
-            .maxOfOrNull { candidate -> scoreTitle(local, candidate, hit.year) }
-            ?: -1
+        if (localTitles.isEmpty() || hitTitles.isEmpty()) return -1
+        return localTitles.maxOf { localTitle ->
+            hitTitles.maxOf { candidate -> scoreTitle(local.year, localTitle, candidate, hit.year) }
+        }
     }
 
-    private fun scoreTitle(local: MediaInfo, candidateTitle: String, candidateYear: Int?): Int {
-        val localKeys = titleKeys(local.title)
+    private fun scoreTitle(localYear: Int?, localTitle: String, candidateTitle: String, candidateYear: Int?): Int {
+        val localKeys = titleKeys(localTitle)
         val hitKeys = titleKeys(candidateTitle)
         if (localKeys.isEmpty() || hitKeys.isEmpty()) return -1
 
         val exactTitle = localKeys.intersect(hitKeys).isNotEmpty()
         // Без локального года каталог может дополнить данные только при точном названии.
-        if (local.year == null && !exactTitle) return -1
+        if (localYear == null && !exactTitle) return -1
 
         var points = if (exactTitle) {
             60
@@ -1577,8 +1589,8 @@ object TitleCatalog {
             (coverage * 30 + precision * 20).toInt()
         }
 
-        if (local.year != null && candidateYear != null) {
-            val delta = kotlin.math.abs(local.year - candidateYear)
+        if (localYear != null && candidateYear != null) {
+            val delta = kotlin.math.abs(localYear - candidateYear)
             points += when {
                 delta == 0 -> 25
                 delta == 1 -> 5
@@ -1590,6 +1602,7 @@ object TitleCatalog {
 
     private fun foldTitle(value: String): String {
         return value.lowercase()
+            .replace('ё', 'е')
             .replace(Regex("""[^\p{L}\p{N}\s]"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
@@ -1601,11 +1614,67 @@ object TitleCatalog {
             .toSet()
     }
 
+    // Русское и английское имя в одном файле: ищем и сравниваем каждую часть отдельно.
+    fun titleVariants(title: String): List<String> {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val withoutBrackets = trimmed
+            .replace(Regex("""[(\[][^)\]]*[)\]]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+        return (listOf(trimmed, withoutBrackets) + scriptParts(trimmed))
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .distinctBy { foldTitle(it).ifBlank { it.lowercase() } }
+    }
+
+    private fun scriptParts(title: String): List<String> {
+        val words = title
+            .replace(Regex("""[\[\](){}/|]"""), " ")
+            .split(Regex("""\s+"""))
+            .filter { it.isNotBlank() }
+        if (words.isEmpty()) return emptyList()
+        val runs = mutableListOf<Pair<CharScript, MutableList<String>>>()
+        for (word in words) {
+            val script = wordScript(word)
+            if (script == CharScript.OTHER) {
+                if (runs.isNotEmpty()) {
+                    runs.last().second.add(word)
+                }
+                continue
+            }
+            val last = runs.lastOrNull()
+            if (last != null && last.first == script) {
+                last.second.add(word)
+            } else {
+                runs += script to mutableListOf(word)
+            }
+        }
+        return runs
+            .map { it.second.joinToString(" ") }
+            .filter { part -> part.any(Char::isLetter) }
+    }
+
+    private enum class CharScript { CYRILLIC, LATIN, OTHER }
+
+    private fun wordScript(word: String): CharScript {
+        val letters = word.filter { it.isLetter() }
+        if (letters.isEmpty()) return CharScript.OTHER
+        val cyrillic = letters.count { it in '\u0400'..'\u04FF' }
+        val latin = letters.count { it in 'A'..'Z' || it in 'a'..'z' }
+        return when {
+            cyrillic > 0 && cyrillic >= latin -> CharScript.CYRILLIC
+            latin > 0 -> CharScript.LATIN
+            else -> CharScript.OTHER
+        }
+    }
+
     fun searchQueries(title: String): List<String> {
-        val raw = title.trim()
-        if (raw.isEmpty()) return emptyList()
-        val cyrillic = latinToCyrillic(raw).trim()
-        return listOf(raw, cyrillic).filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        val variants = titleVariants(title)
+        val transliterated = variants.map { latinToCyrillic(it).trim() }
+        return (variants + transliterated)
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
     }
 
     // Латиница из релизов: brat → брат. Не перевод: dune не станет «Дюна».
@@ -1645,10 +1714,21 @@ object TitleCatalog {
 
     private fun searchTmdbMovie(media: MediaInfo): CatalogHit? {
         val token = tmdbToken() ?: return null
+        val candidate = pickBest(media, tmdbSearchResults(media, token, "ru-RU"))
+            ?: pickBest(media, tmdbSearchResults(media, token, "en-US"))
+            ?: return null
+        val id = candidate.catalogId ?: return candidate
+        val detailsUrl = "https://api.themoviedb.org/3/movie/$id" +
+            "?language=ru-RU&append_to_response=credits,translations"
+        val details = get(detailsUrl, token) ?: return candidate
+        return parseTmdbMovieDetails(details, candidate) ?: candidate
+    }
+
+    private fun tmdbSearchResults(media: MediaInfo, token: String, language: String): List<CatalogHit> {
         val year = media.year?.let { "&year=$it" }.orEmpty()
-        val candidates = searchQueries(media.title).flatMap { query ->
+        return searchQueries(media.title).flatMap { query ->
             val url = "https://api.themoviedb.org/3/search/movie" +
-                "?query=${enc(query)}&language=ru-RU&include_adult=false$year"
+                "?query=${enc(query)}&language=$language&include_adult=false$year"
             val body = get(url, token) ?: return@flatMap emptyList()
             runCatching {
                 json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
@@ -1656,14 +1736,14 @@ object TitleCatalog {
                     .mapNotNull { element ->
                         val item = element.jsonObject
                         val id = item.int("id") ?: return@mapNotNull null
-                        val russianTitle = item.str("title") ?: return@mapNotNull null
+                        val localizedTitle = item.str("title") ?: return@mapNotNull null
                         CatalogHit(
                             site = "TMDB",
-                            title = russianTitle,
+                            title = localizedTitle,
                             year = yearOf(item.str("release_date")),
                             pageUrl = "https://www.themoviedb.org/movie/$id",
                             originalTitle = item.str("original_title"),
-                            russianTitle = russianTitle,
+                            russianTitle = localizedTitle.takeIf { language.startsWith("ru") },
                             originalLanguage = item.str("original_language"),
                             rating = item.double("vote_average")?.takeIf { it > 0.0 },
                             ratingSource = item.double("vote_average")?.takeIf { it > 0.0 }?.let { "TMDB" },
@@ -1672,12 +1752,6 @@ object TitleCatalog {
                     }
             }.getOrDefault(emptyList())
         }.distinctBy { it.catalogId }
-        val candidate = pickBest(media, candidates) ?: return null
-        val id = candidate.catalogId ?: return candidate
-        val detailsUrl = "https://api.themoviedb.org/3/movie/$id" +
-            "?language=ru-RU&append_to_response=credits"
-        val details = get(detailsUrl, token) ?: return candidate
-        return parseTmdbMovieDetails(details, candidate) ?: candidate
     }
 
     fun parseTmdbMovieDetails(body: String, fallback: CatalogHit? = null): CatalogHit? {
@@ -1686,6 +1760,11 @@ object TitleCatalog {
             val id = root.int("id") ?: fallback?.catalogId ?: return@runCatching null
             val russianTitle = root.str("title") ?: fallback?.russianTitle ?: fallback?.title
                 ?: return@runCatching null
+            val apiOriginalTitle = root.str("original_title") ?: fallback?.originalTitle
+            val englishTitle = tmdbTranslatedTitle(root, "en")
+                ?: fallback?.originalTitle?.takeIf(::hasLatinLetters)
+                ?: fallback?.title?.takeIf(::hasLatinLetters)
+            val originalTitle = preferredOriginalTitle(apiOriginalTitle, englishTitle)
             val genres = root["genres"]?.jsonArray.orEmpty()
                 .mapNotNull { it.jsonObject.str("name") }
                 .distinct()
@@ -1708,7 +1787,7 @@ object TitleCatalog {
                 title = russianTitle,
                 year = yearOf(root.str("release_date")) ?: fallback?.year,
                 pageUrl = "https://www.themoviedb.org/movie/$id",
-                originalTitle = root.str("original_title") ?: fallback?.originalTitle,
+                originalTitle = originalTitle,
                 russianTitle = russianTitle,
                 originalLanguage = root.str("original_language") ?: fallback?.originalLanguage,
                 genres = genres,
@@ -1722,6 +1801,38 @@ object TitleCatalog {
                 catalogId = id,
             )
         }.getOrNull()
+    }
+
+    private fun tmdbTranslatedTitle(root: JsonObject, language: String): String? {
+        val translations = runCatching {
+            root["translations"]?.jsonObject?.get("translations")?.jsonArray
+        }.getOrNull().orEmpty()
+        return translations.firstNotNullOfOrNull { element ->
+            val item = runCatching { element.jsonObject }.getOrNull() ?: return@firstNotNullOfOrNull null
+            if (!item.str("iso_639_1").equals(language, ignoreCase = true)) return@firstNotNullOfOrNull null
+            item["data"]?.jsonObject?.str("title")?.trim()?.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    private fun preferredOriginalTitle(original: String?, english: String?): String? {
+        val orig = original?.trim()?.takeIf { it.isNotEmpty() }
+        val eng = english?.trim()?.takeIf { it.isNotEmpty() }
+        if (orig != null && hasLatinOrCyrillicLetters(orig)) return orig
+        return eng ?: orig
+    }
+
+    private fun hasLatinLetters(value: String): Boolean = letterShare(value) { char ->
+        char in 'A'..'Z' || char in 'a'..'z'
+    }
+
+    private fun hasLatinOrCyrillicLetters(value: String): Boolean = letterShare(value) { char ->
+        char in 'A'..'Z' || char in 'a'..'z' || char in '\u0400'..'\u04FF'
+    }
+
+    private fun letterShare(value: String, allowed: (Char) -> Boolean): Boolean {
+        val letters = value.filter { it.isLetter() }
+        if (letters.isEmpty()) return false
+        return letters.count(allowed) * 2 >= letters.length
     }
 
     private fun searchPoiskKinoMovie(media: MediaInfo): CatalogHit? {
