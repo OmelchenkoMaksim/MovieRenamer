@@ -27,7 +27,9 @@ catalog-tokens.properties
 
 # DEBUG writes generated copies here; samples stay in git
 /debug/results/
+/debug/reverted/
 /debug/revert-cache.json
+/debug/debug-revert-cache.json
 
 # macOS
 .DS_Store

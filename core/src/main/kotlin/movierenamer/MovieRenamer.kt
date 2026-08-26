@@ -59,6 +59,10 @@ object MovieRenamer {
             revertNames(settings)
             return
         }
+        if (settings.mode == WorkMode.DEBUG_REVERT) {
+            revertDebugNames(settings)
+            return
+        }
 
         val lookupOnline = settings.lookupOnline || settings.mode == WorkMode.DEBUG
         val debug = settings.mode == WorkMode.DEBUG
@@ -169,7 +173,7 @@ object MovieRenamer {
             MediaPrinter.print(index, plan, settings.mode, lookupOnline)
 
             when (settings.mode) {
-                WorkMode.PREVIEW, WorkMode.REVERT -> Unit
+                WorkMode.PREVIEW, WorkMode.REVERT, WorkMode.DEBUG_REVERT -> Unit
                 WorkMode.DEBUG -> {
                     val results = resultsDirectory ?: return@forEachIndexed
                     if (plan.status == PlanStatus.READY) {
@@ -187,7 +191,7 @@ object MovieRenamer {
                                 sourceFileName = plan.file.fileName.toString(),
                             )
                             historyDirectory = results
-                            NameHistory.save(results, remembered)
+                            NameHistory.save(results, remembered, Config.debugRevertCache)
                             writtenResults++
                         } catch (exception: Exception) {
                             val message = exception.message ?: "неизвестная ошибка"
@@ -225,7 +229,8 @@ object MovieRenamer {
 
         historyDirectory?.let { directory ->
             if (remembered.isNotEmpty()) {
-                NameHistory.save(directory, remembered)
+                val cache = if (debug) Config.debugRevertCache else Config.revertCache
+                NameHistory.save(directory, remembered, cache)
             }
         }
 
@@ -261,7 +266,7 @@ object MovieRenamer {
                 FileGuard.copy(library, plan.file, target)
                 FileGuard.copySidecars(library, plan.file, target)
             }
-            WorkMode.PREVIEW, WorkMode.DEBUG, WorkMode.REVERT -> Unit
+            WorkMode.PREVIEW, WorkMode.DEBUG, WorkMode.DEBUG_REVERT, WorkMode.REVERT -> Unit
         }
     }
 
@@ -348,6 +353,137 @@ object MovieRenamer {
         )
     }
 
+    private fun revertDebugNames(settings: LaunchSettings) {
+        Talk.info("Запуск Movie Renamer")
+        Talk.info("Режим: ${settings.mode.displayName}")
+        val results = Config.debugResults.toAbsolutePath().normalize()
+        val reverted = Config.debugReverted.toAbsolutePath().normalize()
+        Talk.info("Читаем результаты DEBUG: $results")
+        Talk.info("Пишем откат: $reverted")
+
+        if (!results.isDirectory()) {
+            Talk.info("debug/results пуста — сначала запустите DEBUG. DEBUG_REVERT сам его не запускает")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = results,
+                    filesRead = 0,
+                    apiRequests = 0,
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory = null,
+            )
+            return
+        }
+
+        val videoFiles = try {
+            VideoScanner.findVideoFiles(results)
+        } catch (exception: Exception) {
+            Talk.error("Ошибка сканирования: ${exception.message}")
+            return
+        }
+        if (videoFiles.isEmpty()) {
+            Talk.info("debug/results пуста — сначала запустите DEBUG. DEBUG_REVERT сам его не запускает")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = results,
+                    filesRead = 0,
+                    apiRequests = 0,
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory = null,
+            )
+            return
+        }
+
+        val snapshot = loadDebugRevertSnapshot(results)
+        if (snapshot.pairs.isEmpty()) {
+            Talk.info("Кэш имён DEBUG пуст (${Config.debugRevertCache}) — откатывать нечего")
+            printReport(
+                RunReport(
+                    mode = settings.mode,
+                    directory = results,
+                    filesRead = videoFiles.size,
+                    apiRequests = 0,
+                    parsed = 0,
+                    unclear = 0,
+                    changed = 0,
+                    writtenResults = 0,
+                    errors = emptyList(),
+                ),
+                resultsDirectory = null,
+            )
+            return
+        }
+
+        Talk.info("Пар в кэше DEBUG: ${snapshot.pairs.size}")
+        FileGuard.prepareRevertedDirectory(reverted)
+        Talk.info("Найдено файлов: ${videoFiles.size}")
+        println()
+
+        val plans = RevertPlanner.planAll(results, videoFiles, snapshot.pairs)
+        val errors = mutableListOf<FileIssue>()
+        var writtenResults = 0
+
+        plans.forEachIndexed { index, plan ->
+            MediaPrinter.print(index, plan, settings.mode)
+            if (plan.status != PlanStatus.READY && plan.status != PlanStatus.ALREADY_OK) {
+                return@forEachIndexed
+            }
+            try {
+                FileGuard.copyToReverted(
+                    sourceLibrary = results,
+                    from = plan.file,
+                    revertedDirectory = reverted,
+                    originalName = plan.proposedName,
+                )
+                writtenResults++
+            } catch (exception: Exception) {
+                val message = exception.message ?: "неизвестная ошибка"
+                Talk.error("Не удалось вернуть ${plan.file.fileName}: $message")
+                errors += FileIssue(plan.file, message)
+            }
+        }
+
+        Talk.info("Сравните $reverted с ${Config.debugSamples.toAbsolutePath().normalize()} — имена должны совпасть")
+        printReport(
+            RunReport(
+                mode = settings.mode,
+                directory = results,
+                filesRead = videoFiles.size,
+                apiRequests = 0,
+                parsed = plans.count { it.status != PlanStatus.UNCLEAR },
+                unclear = plans.count { it.status == PlanStatus.UNCLEAR },
+                changed = 0,
+                writtenResults = writtenResults,
+                errors = errors,
+                unclearFiles = plans.filter { it.status == PlanStatus.UNCLEAR }.map { it.file },
+            ),
+            resultsDirectory = reverted,
+        )
+    }
+
+    private fun loadDebugRevertSnapshot(results: Path): RevertSnapshot {
+        val debug = NameHistory.load(Config.debugRevertCache)
+        if (debug.pairs.isNotEmpty()) return debug
+        val fallback = NameHistory.load(Config.revertCache)
+        val fromResults = fallback.directory?.toAbsolutePath()?.normalize() == results
+        if (fallback.pairs.isNotEmpty() && fromResults) {
+            Talk.info("Кэш DEBUG пуст, читаем пары из ${Config.revertCache}")
+            return fallback
+        }
+        return debug
+    }
+
     private fun rememberRename(
         remembered: MutableMap<String, String>,
         currentRelative: String,
@@ -365,7 +501,10 @@ object MovieRenamer {
     private fun printReport(report: RunReport, resultsDirectory: Path?) {
         println()
         ReportPrinter.print(report)
-        if (report.mode == WorkMode.DEBUG && resultsDirectory != null) {
+        if (
+            (report.mode == WorkMode.DEBUG || report.mode == WorkMode.DEBUG_REVERT) &&
+            resultsDirectory != null
+        ) {
             ReportPrinter.writeFile(resultsDirectory.resolve("summary.txt"), report)
         }
     }
@@ -389,7 +528,9 @@ object Config {
 
     val debugSamples: Path = Path.of("debug", "samples")
     val debugResults: Path = Path.of("debug", "results")
+    val debugReverted: Path = Path.of("debug", "reverted")
     val revertCache: Path = Path.of("debug", "revert-cache.json")
+    val debugRevertCache: Path = Path.of("debug", "debug-revert-cache.json")
 }
 
 // 0001.04 Режим задаётся в Main.kt.
@@ -398,6 +539,7 @@ enum class WorkMode(val displayName: String) {
     RENAME("переименовать на месте"),
     COPY("копия с новым именем, оригинал оставить"),
     DEBUG("тренировка: samples читаем, results пишем"),
+    DEBUG_REVERT("тренировка отката: results читаем, reverted пишем"),
     REVERT("вернуть прошлые имена"),
 }
 
@@ -732,17 +874,32 @@ object FileGuard {
     }
 
     fun isDebugResultsPath(directory: Path): Boolean {
-        val root = directory.toAbsolutePath().normalize()
-        return root == Config.debugResults.toAbsolutePath().normalize()
+        return isPinnedDebugPath(directory, Config.debugResults)
+    }
+
+    fun isDebugRevertedPath(directory: Path): Boolean {
+        return isPinnedDebugPath(directory, Config.debugReverted)
+    }
+
+    private fun isPinnedDebugPath(directory: Path, expected: Path): Boolean {
+        return directory.toAbsolutePath().normalize() == expected.toAbsolutePath().normalize()
     }
 
     // 0100.02.01 Только debug/results. Исходники samples не чистим и не пишем.
     fun prepareResultsDirectory(directory: Path) {
+        prepareDebugOutputDirectory(directory, Config.debugResults, "debug/results")
+    }
+
+    fun prepareRevertedDirectory(directory: Path) {
+        prepareDebugOutputDirectory(directory, Config.debugReverted, "debug/reverted")
+    }
+
+    private fun prepareDebugOutputDirectory(directory: Path, expected: Path, label: String) {
         val root = directory.toAbsolutePath().normalize()
-        checkDebugResultsDirectory(root)
+        checkDebugOutputDirectory(root, expected, label)
         Files.createDirectories(root)
         check(!Files.isSymbolicLink(root) && isInside(Path.of("").toAbsolutePath(), root)) {
-            "debug/results не должен быть симлинком или вести за пределы проекта: $root"
+            "$label не должен быть симлинком или вести за пределы проекта: $root"
         }
         Files.list(root).use { stream ->
             stream.forEach { path ->
@@ -759,18 +916,52 @@ object FileGuard {
         resultsDirectory: Path,
         newName: String,
     ) {
-        val destRoot = resultsDirectory.toAbsolutePath().normalize()
-        checkDebugResultsDirectory(destRoot)
+        copyToDebugOutput(
+            sourceLibrary = sourceLibrary,
+            from = from,
+            outputDirectory = resultsDirectory,
+            expectedOutput = Config.debugResults,
+            newName = newName,
+            label = "debug/results",
+        )
+    }
+
+    fun copyToReverted(
+        sourceLibrary: Path,
+        from: Path,
+        revertedDirectory: Path,
+        originalName: String,
+    ) {
+        copyToDebugOutput(
+            sourceLibrary = sourceLibrary,
+            from = from,
+            outputDirectory = revertedDirectory,
+            expectedOutput = Config.debugReverted,
+            newName = originalName,
+            label = "debug/reverted",
+        )
+    }
+
+    private fun copyToDebugOutput(
+        sourceLibrary: Path,
+        from: Path,
+        outputDirectory: Path,
+        expectedOutput: Path,
+        newName: String,
+        label: String,
+    ) {
+        val destRoot = outputDirectory.toAbsolutePath().normalize()
+        checkDebugOutputDirectory(destRoot, expectedOutput, label)
         check(Files.isDirectory(destRoot, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(destRoot)) {
-            "Папка DEBUG results не готова или является симлинком: $destRoot"
+            "Папка $label не готова или является симлинком: $destRoot"
         }
         val source = from.toAbsolutePath().normalize()
         check(isInside(sourceLibrary, source)) {
-            "Читаем только файлы из samples/библиотеки: $source"
+            "Читаем только файлы из $sourceLibrary: $source"
         }
         val target = destRoot.resolve(newName).normalize()
         check(isInside(destRoot, target)) {
-            "Не выходим из debug/results"
+            "Не выходим из $label"
         }
         check(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
             "Источник не обычный файл: $source"
@@ -781,20 +972,20 @@ object FileGuard {
         Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS)
     }
 
-    private fun checkDebugResultsDirectory(directory: Path) {
-        check(isDebugResultsPath(directory)) {
-            "Результаты DEBUG пишем только в ${Config.debugResults.toAbsolutePath().normalize()}, а не в $directory"
+    private fun checkDebugOutputDirectory(directory: Path, expected: Path, label: String) {
+        check(isPinnedDebugPath(directory, expected)) {
+            "Пишем только в ${expected.toAbsolutePath().normalize()}, а не в $directory"
         }
         val projectRoot = Path.of("").toAbsolutePath().normalize()
         val parent = directory.parent
         check(parent != null && Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
-            "Родительская папка DEBUG не найдена: $parent"
+            "Родительская папка $label не найдена: $parent"
         }
         check(!Files.isSymbolicLink(parent) && isInside(projectRoot, directory)) {
-            "debug/results не должен вести за пределы проекта: $directory"
+            "$label не должен вести за пределы проекта: $directory"
         }
         check(!Files.isSymbolicLink(directory)) {
-            "debug/results не должен быть симлинком: $directory"
+            "$label не должен быть симлинком: $directory"
         }
     }
 
@@ -1536,7 +1727,7 @@ object MediaPrinter {
                 println("Название: ${media.title}")
             }
             printCatalogLine(plan, lookupOnline)
-            if (mode == WorkMode.DEBUG) {
+            if (mode == WorkMode.DEBUG || mode == WorkMode.DEBUG_REVERT) {
                 println("Полный путь: ${plan.file}")
             }
             return
@@ -1547,8 +1738,11 @@ object MediaPrinter {
         }
         printCatalogLine(plan, lookupOnline)
 
-        if (mode == WorkMode.DEBUG) {
+        if (mode == WorkMode.DEBUG || mode == WorkMode.DEBUG_REVERT) {
             println("Полный путь: ${plan.file}")
+            if (mode == WorkMode.DEBUG_REVERT) {
+                return
+            }
             println("Тип: ${media.mediaType.displayName}")
             println("Название: ${media.title}")
             if (media.mediaType == MediaType.MOVIE) {
@@ -1621,6 +1815,9 @@ object ReportPrinter {
             add("Файлов изменено в библиотеке: ${report.changed}")
             if (report.mode == WorkMode.DEBUG) {
                 add("Записано в debug/results: ${report.writtenResults}")
+            }
+            if (report.mode == WorkMode.DEBUG_REVERT) {
+                add("Записано в debug/reverted: ${report.writtenResults}")
             }
             add("Ошибок: ${report.errors.size}")
             report.errors.forEach { add("  ошибка: ${it.file.fileName} — ${it.message}") }

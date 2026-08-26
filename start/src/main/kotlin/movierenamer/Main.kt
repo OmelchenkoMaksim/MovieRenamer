@@ -5,7 +5,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Properties
 
-// 0000 Настройки старта. DEBUG всегда ходит только в debug/samples → debug/results.
+// 0000 Настройки старта. DEBUG: debug/samples → debug/results.
+// DEBUG_REVERT: debug/results → debug/reverted (если results пуста — только лог).
 
 // Укажите ПАПКУ с видео, не путь к отдельному фильму.
 // Windows: для C:\Users\Ivan\Desktop\Dune.mkv → Path.of("C:/Users/Ivan/Desktop")
@@ -17,12 +18,17 @@ import java.util.Properties
 private val moviesDirectory: Path = Path.of("movies")
 
 private val workMode: WorkMode = WorkMode.DEBUG
+
 // WorkMode.PREVIEW — библиотека movies: только читаем
+//
 // WorkMode.RENAME  — библиотека movies: переименовать на месте
-// WorkMode.COPY    — библиотека movies: копия с новым именем
+// WorkMode.COPY    — библиотека movies: копия с новым именем//                         свой кеш: debug/debug-revert-cache.json; если results пуста — только лог,
+//                         DEBUG сам не запускаем
+// WorkMode.REVERT  — вернуть имена из кэша последнего переименования библиотеки
+//
 // WorkMode.DEBUG   — только debug/samples и debug/results, movies не трогаем;
 //                    онлайн-поиск и токены TMDB/ПоискКино работают так же, как в остальных режимах
-// WorkMode.REVERT  — вернуть имена из кэша последнего переименования
+// WorkMode.DEBUG_REVERT — читаем debug/results, пишем исходные имена в debug/reverted;
 
 private val lookupOnline: Boolean = true
 
@@ -60,7 +66,8 @@ private fun installCatalogTokens() {
 }
 
 private fun findCatalogTokensFile(): Path? {
-    val relative = Path.of("start", "src", "main", "kotlin", "movierenamer", "catalog-tokens.properties")
+    val relative =
+        Path.of("start", "src", "main", "kotlin", "movierenamer", "catalog-tokens.properties")
     val nextToMain = Path.of("src", "main", "kotlin", "movierenamer", "catalog-tokens.properties")
     val shortName = Path.of("catalog-tokens.properties")
     val roots = buildList {

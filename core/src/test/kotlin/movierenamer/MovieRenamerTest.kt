@@ -231,7 +231,7 @@ class MovieRenamerTest {
     }
 
     @Test
-    fun `catalog matches a romanized russian title like brat to Брат`() {
+    fun `catalog matches a romanized russian title like brat to its cyrillic form`() {
         assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
         assertEquals(listOf("brat", "брат"), TitleCatalog.searchQueries("brat"))
         assertEquals(
@@ -349,6 +349,22 @@ class MovieRenamerTest {
         assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/results")))
         assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/MovieRenamer/debug/samples")))
         assertFalse(FileGuard.isDebugResultsPath(Path.of("/tmp/movies")))
+        assertFalse(FileGuard.isDebugResultsPath(Config.debugReverted))
+    }
+
+    @Test
+    fun `debug reverted path is only debug slash reverted`() {
+        assertTrue(FileGuard.isDebugRevertedPath(Config.debugReverted))
+        assertFalse(FileGuard.isDebugRevertedPath(Config.debugResults))
+        assertFalse(FileGuard.isDebugRevertedPath(Config.debugSamples))
+        assertFalse(FileGuard.isDebugRevertedPath(Path.of("/tmp/MovieRenamer/debug/reverted")))
+    }
+
+    @Test
+    fun `debug revert cache is not the library revert cache`() {
+        assertEquals(Path.of("debug", "revert-cache.json"), Config.revertCache)
+        assertEquals(Path.of("debug", "debug-revert-cache.json"), Config.debugRevertCache)
+        assertEquals(Path.of("debug", "reverted"), Config.debugReverted)
     }
 
     @Test
@@ -357,6 +373,18 @@ class MovieRenamerTest {
         try {
             assertFailsWith<IllegalStateException> {
                 FileGuard.prepareResultsDirectory(random)
+            }
+        } finally {
+            Files.deleteIfExists(random)
+        }
+    }
+
+    @Test
+    fun `prepareRevertedDirectory refuses to clean a random folder`() {
+        val random = Files.createTempDirectory("not-debug-reverted")
+        try {
+            assertFailsWith<IllegalStateException> {
+                FileGuard.prepareRevertedDirectory(random)
             }
         } finally {
             Files.deleteIfExists(random)
@@ -1131,6 +1159,37 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `debug revert cache stores original sample names separately`() {
+        val debugCache = Files.createTempFile("debug-revert-cache-", ".json")
+        val libraryCache = Files.createTempFile("revert-cache-", ".json")
+        val results = Files.createTempDirectory("debug-results-")
+        val library = Files.createTempDirectory("library-")
+        try {
+            NameHistory.save(
+                results,
+                mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv"),
+                debugCache,
+            )
+            NameHistory.save(
+                library,
+                mapOf("Dune (2021) 1080p.mkv" to "Dune.2021.mkv"),
+                libraryCache,
+            )
+
+            val debug = NameHistory.load(debugCache)
+            val other = NameHistory.load(libraryCache)
+            assertEquals("The.Matrix.1999.mkv", debug.pairs["The Matrix (1999) 1080p.mkv"])
+            assertEquals("Dune.2021.mkv", other.pairs["Dune (2021) 1080p.mkv"])
+            assertNull(other.pairs["The Matrix (1999) 1080p.mkv"])
+        } finally {
+            Files.deleteIfExists(debugCache)
+            Files.deleteIfExists(libraryCache)
+            Files.deleteIfExists(results)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
     fun `revert planner leaves a file without a cache pair unclear`() {
         val library = Files.createTempDirectory("library-")
         val video = library.resolve("other.mkv")
@@ -1711,7 +1770,7 @@ class ParserFixesTest {
     }
 
     @Test
-    fun `catalog matches a numbered first film like Матрица 1`() {
+    fun `catalog matches a numbered first film like Matrix 1`() {
         val local = MediaParser.parse(Path.of("Матрица 1 (1999) 2160p WEB-DL.mkv"))
         assertEquals("Матрица 1", local.title)
         assertEquals(1999, local.year)
@@ -1729,7 +1788,7 @@ class ParserFixesTest {
     }
 
     @Test
-    fun `catalog matches Матрица 2 Перезагрузка to the official sequel title`() {
+    fun `catalog matches Matrix 2 Reloaded to the official sequel title`() {
         val local = MediaParser.parse(Path.of("Матрица 2 Перезагрузка (2003) 2160p WEB-DL.mkv"))
         assertEquals("Матрица 2 Перезагрузка", local.title)
         val reloaded = CatalogHit(
@@ -1762,7 +1821,7 @@ class ParserFixesTest {
     }
 
     @Test
-    fun `catalog matches Матрица 3 Революция to the official sequel title`() {
+    fun `catalog matches Matrix 3 Revolutions to the official sequel title`() {
         val local = MediaParser.parse(Path.of("Матрица 3 Революция (2003) 2160p WEB-DL.mkv"))
         val revolutions = CatalogHit(
             "TMDB",
