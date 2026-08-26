@@ -2194,3 +2194,128 @@ class LogFixesTest {
         assertFalse(TitleCatalog.movieHitNeedsMoreData(hit))
     }
 }
+
+class LogFixesRoundTwoTest {
+
+    @Test
+    fun `first installment survives the query ladder`() {
+        val ladder = TitleCatalog.primaryQueries("SAW I")
+        assertTrue("SAW" in ladder, "потеряли главный вариант: $ladder")
+        assertFalse(ladder.any { it.contains("The SAW I") }, "лишний артикль: $ladder")
+    }
+
+    @Test
+    fun `SAW I matches Saw by original title`() {
+        val local = MediaParser.parse(Path.of("SAW I - 1080p 60 FPS.mkv"))
+        assertEquals("SAW I", local.title)
+        val saw = CatalogHit(
+            "TMDB",
+            "Пила",
+            2004,
+            null,
+            originalTitle = "Saw",
+            russianTitle = "Пила",
+            catalogId = 176,
+        )
+        assertSame(saw, TitleCatalog.pickBest(local, listOf(saw)))
+    }
+
+    @Test
+    fun `SAW I without a year refuses two Saw entries`() {
+        TitleCatalog.resetStats()
+        val local = MediaParser.parse(Path.of("SAW I - 1080p 60 FPS.mkv"))
+        assertNull(
+            TitleCatalog.pickBest(
+                local,
+                listOf(
+                    CatalogHit("TMDB", "Пила", 2004, null, originalTitle = "Saw", catalogId = 176),
+                    CatalogHit("TMDB", "Пила", 2003, null, originalTitle = "Saw", catalogId = 500),
+                ),
+            ),
+        )
+        assertTrue(TitleCatalog.noteFor(local)?.contains("Допишите год") == true)
+    }
+
+    @Test
+    fun `trailing the movie is stripped for search`() {
+        assertEquals("F1", TitleCatalog.stripTailNoise("F1 The Movie"))
+        assertEquals("Jackass", TitleCatalog.stripTailNoise("Jackass The Movie"))
+        assertNull(TitleCatalog.stripTailNoise("The Matrix"))
+        assertTrue("F1" in TitleCatalog.primaryQueries("F1 The Movie"))
+    }
+
+    @Test
+    fun `F1 The Movie matches the catalog entry F1`() {
+        val local = MediaParser.parse(Path.of("F1 The Movie (2025) 2160p WEB-DL.mkv"))
+        assertEquals("F1 The Movie", local.title)
+        assertEquals(2025, local.year)
+        val f1 = CatalogHit(
+            "TMDB",
+            "Ф1",
+            2025,
+            null,
+            originalTitle = "F1",
+            russianTitle = "Ф1",
+            catalogId = 911430,
+        )
+        assertSame(f1, TitleCatalog.pickBest(local, listOf(f1)))
+    }
+
+    @Test
+    fun `exact title still beats the shortened one`() {
+        val exact = CatalogHit(
+            "TMDB",
+            "Чудаки",
+            2002,
+            null,
+            originalTitle = "Jackass: The Movie",
+            catalogId = 1,
+        )
+        val bare = CatalogHit(
+            "TMDB",
+            "Джекасс",
+            2002,
+            null,
+            originalTitle = "Jackass",
+            catalogId = 2,
+        )
+        val local = MediaParser.parse(Path.of("Jackass.The.Movie.2002.mkv"))
+        assertSame(exact, TitleCatalog.pickBest(local, listOf(bare, exact)))
+    }
+
+    @Test
+    fun `reverse prefix needs the exact year`() {
+        val rocky = CatalogHit("TMDB", "Рокки", 1976, null, originalTitle = "Rocky", catalogId = 1366)
+        assertNull(
+            TitleCatalog.pickBest(
+                MediaParser.parse(Path.of("Rocky Balboa Story (1979).mkv")),
+                listOf(rocky),
+            ),
+        )
+        assertSame(
+            rocky,
+            TitleCatalog.pickBest(
+                MediaParser.parse(Path.of("Rocky Balboa Story (1976).mkv")),
+                listOf(rocky),
+            ),
+        )
+    }
+
+    @Test
+    fun `a numbered sequel is not swallowed by the reverse prefix`() {
+        val terminator = CatalogHit(
+            "TMDB",
+            "Терминатор",
+            1984,
+            null,
+            originalTitle = "The Terminator",
+            catalogId = 218,
+        )
+        assertNull(
+            TitleCatalog.pickBest(
+                MediaParser.parse(Path.of("The Terminator 2 (1984).mkv")),
+                listOf(terminator),
+            ),
+        )
+    }
+}

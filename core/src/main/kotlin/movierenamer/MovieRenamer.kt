@@ -544,6 +544,9 @@ object Config {
 
     // Фильм без ответа каталога переименовывать нечем: получится голое имя.
     const val renameWithoutCatalog: Boolean = false
+
+    // Печатать каждый запрос к каталогу. Включать точечно, когда фильм «не нашёлся».
+    const val logCatalogQueries: Boolean = false
 }
 
 // 0001.04 Режим задаётся в Main.kt.
@@ -2044,24 +2047,23 @@ object TitleCatalog {
             return null
         }
         val key = cacheKey(media)
-        return cache.getOrPut(key) {
-            val tmdb = searchTmdb(media)
-            val poiskKino = if (movieHitNeedsMoreData(tmdb) && isPoiskKinoConfigured()) {
-                searchPoiskKinoMovie(media)
-            } else {
-                null
-            }
-            val fromPrimaryCatalogs = chooseMovieHit(media, tmdb, poiskKino, fallbackHits = emptyList())
-            if (fromPrimaryCatalogs != null) return@getOrPut fromPrimaryCatalogs
-            chooseMovieHit(
-                media,
-                tmdb = null,
-                poiskKino = null,
-                fallbackHits = searchFallbackCatalogs(media),
-            )
-        }.also { hit ->
-            if (hit != null) notes.remove(key)
+        if (cache.containsKey(key)) return cache[key]
+        val tmdb = searchTmdb(media)
+        val poiskKino = if (movieHitNeedsMoreData(tmdb) && isPoiskKinoConfigured()) {
+            searchPoiskKinoMovie(media, tmdb)
+        } else {
+            null
         }
+        val fromPrimaryCatalogs = chooseMovieHit(media, tmdb, poiskKino, fallbackHits = emptyList())
+        val hit = fromPrimaryCatalogs ?: chooseMovieHit(
+            media,
+            tmdb = null,
+            poiskKino = null,
+            fallbackHits = searchFallbackCatalogs(media),
+        )
+        cache[key] = hit
+        if (hit != null) notes.remove(key)
+        return hit
     }
 
     // TMDB → недостающие поля из ПоискКино → только если оба пустые, iTunes/TVMaze/Wikipedia.
@@ -2202,18 +2204,25 @@ object TitleCatalog {
         val exactTitle = localKeys.intersect(hitKeys).isNotEmpty() ||
             localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } } ||
             isSequelTitleMatch(localTitle, candidateTitle)
-        val firstInstallment = !exactTitle &&
+        val noiseTail = !exactTitle &&
+            stripTailNoise(localTitle)
+                ?.let { titleKeys(it).intersect(hitKeys).isNotEmpty() } == true
+        val firstInstallment = !exactTitle && !noiseTail &&
             stripFirstInstallment(localTitle)
                 ?.let { titleKeys(it).intersect(hitKeys).isNotEmpty() } == true
+        val shortHitPrefix = localYear != null && localYear == candidateYear &&
+            localKeys.any { local -> hitKeys.any { hit -> isShortTailPrefix(local, hit) } }
         val strippedMatch = localYear != null &&
             candidateYear != null &&
             isNumberStrippedTitleMatch(localTitle, candidateTitle)
-        if (localYear == null && !exactTitle && !firstInstallment) return -1
+        if (localYear == null && !exactTitle && !noiseTail && !firstInstallment) return -1
 
         var points = when {
             exactTitle -> 60
+            noiseTail -> 58
             firstInstallment -> 55
             strippedMatch -> 50
+            shortHitPrefix -> 50
             else -> {
                 val localWords = localKeys.maxBy { it.length }.split(" ").filter(String::isNotBlank).toSet()
                 val hitWords = hitKeys.maxBy { it.length }.split(" ").filter(String::isNotBlank).toSet()
@@ -2246,6 +2255,32 @@ object TitleCatalog {
         if (rest.first().isDigit()) return false
         val localWords = local.split(" ").filter { it.isNotBlank() }
         return localWords.size >= 3
+    }
+
+    // Хвост в файле, которого нет в каталоге. Год обязан совпасть точно,
+    // иначе «Rocky II» (1979) немедленно уедет на «Rocky» (1976).
+    private fun isShortTailPrefix(local: String, hit: String): Boolean {
+        if (local == hit) return true
+        if (!hit.any(Char::isLetterOrDigit) || hit.length < 2) return false
+        if (!local.startsWith("$hit ")) return false
+        val tail = local.removePrefix("$hit ").split(" ").filter { it.isNotBlank() }
+        if (tail.isEmpty()) return true
+        if (tail.size > 2) return false
+        return tail.none { it.first().isDigit() || isNumberingToken(it) }
+    }
+
+    private val tailNoiseWords = setOf("movie", "film", "фильм", "кино")
+
+    // «F1 The Movie» → «F1». Только служебный хвост, содержательные слова не трогаем.
+    fun stripTailNoise(title: String): String? {
+        var words = title.split(Regex("""\s+""")).filter { it.isNotBlank() }
+        while (words.size >= 2) {
+            val last = foldTitle(words.last())
+            if (last !in tailNoiseWords && last !in englishArticles) break
+            words = words.dropLast(1)
+        }
+        val result = words.joinToString(" ").trim().trimEnd(':', '-', ',', '.')
+        return result.takeIf { it.isNotBlank() && !it.equals(title, ignoreCase = true) }
     }
 
     private val partWords = setOf(
@@ -2322,6 +2357,10 @@ object TitleCatalog {
     }
 
     private fun isNumberStrippedTitleMatch(localTitle: String, candidateTitle: String): Boolean {
+        val lastWord = foldTitle(localTitle).split(" ").filter { it.isNotBlank() }.lastOrNull()
+        if (lastWord != null && lastWord in numberingTokens && lastWord !in firstInstallmentTokens) {
+            return false
+        }
         val stripped = stripNumberingTokens(localTitle)
         if (stripped.isBlank() || foldTitle(stripped) == foldTitle(localTitle)) return false
         val localKeys = titleKeys(stripped)
@@ -2437,24 +2476,29 @@ object TitleCatalog {
         return (latin + transliteratedQueries(title)).distinctBy { it.lowercase() }
     }
 
-    fun searchQueryLadder(title: String): List<String> {
+    fun searchQueryLadder(title: String): List<String> =
+        (primaryQueries(title) + shortenedQueries(title)).distinctBy { it.lowercase() }
+
+    fun primaryQueries(title: String): List<String> {
         val withoutNumbering = stripNumberingTokens(title)
-        val extra = if (withoutNumbering.isNotBlank() && withoutNumbering != title) {
-            searchQueries(withoutNumbering) + shortenedQueries(withoutNumbering)
+        val numbering = if (withoutNumbering.isNotBlank() && withoutNumbering != title) {
+            searchQueries(withoutNumbering)
         } else {
             emptyList()
         }
-        val withThe = if (shouldTryLeadingThe(title)) searchQueries("The $title") else emptyList()
         val firstPart = stripFirstInstallment(title)?.let(::searchQueries).orEmpty()
-        return (searchQueries(title) + firstPart + extra + withThe + shortenedQueries(title))
+        val withoutTail = stripTailNoise(title)?.let(::searchQueries).orEmpty()
+        val withThe = if (shouldTryLeadingThe(title)) searchQueries("The $title") else emptyList()
+        return (searchQueries(title) + firstPart + withoutTail + numbering + withThe)
             .distinctBy { it.lowercase() }
     }
 
     private fun shouldTryLeadingThe(title: String): Boolean {
         if (title.any { it in '\u0400'..'\u04FF' }) return false
+        if (stripFirstInstallment(title) != null) return false
         val words = foldTitle(title).split(" ").filter { it.isNotBlank() }
         if (words.isEmpty() || words.size > 4) return false
-        return words.first() !in englishArticles
+        return words.none { it in englishArticles }
     }
 
     fun shortenedQueries(title: String): List<String> {
@@ -2582,14 +2626,19 @@ object TitleCatalog {
 
     private fun tmdbPick(media: MediaInfo, token: String, language: String, tv: Boolean): CatalogHit? {
         val collected = mutableListOf<CatalogHit>()
-        var queriesAfterFirstAnswer = 0
-        for (query in searchQueryLadder(media.title)) {
-            collected += tmdbSearchOnce(query, media, token, language, tv)
+        var answered = 0
+        for (query in primaryQueries(media.title)) {
+            val found = tmdbSearchOnce(query, media, token, language, tv)
+            collected += found
             pickBest(media, collected)?.let { return it }
-            if (collected.isNotEmpty()) {
-                queriesAfterFirstAnswer++
-                if (queriesAfterFirstAnswer >= 2) return null
-            }
+            if (found.isNotEmpty()) answered++
+        }
+        if (answered > 0) return null
+        for (query in shortenedQueries(media.title)) {
+            val found = tmdbSearchOnce(query, media, token, language, tv)
+            collected += found
+            pickBest(media, collected)?.let { return it }
+            if (found.isNotEmpty()) return null
         }
         return null
     }
@@ -2606,7 +2655,7 @@ object TitleCatalog {
         val url = "https://api.themoviedb.org/3/$path" +
             "?query=${enc(query)}&language=$language&include_adult=false$year"
         val body = get(url, token) ?: return emptyList()
-        return runCatching {
+        val hits = runCatching {
             json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
                 .take(10)
                 .mapNotNull { element ->
@@ -2634,6 +2683,13 @@ object TitleCatalog {
                     )
                 }
         }.getOrDefault(emptyList())
+        if (Config.logCatalogQueries) {
+            Talk.info(
+                "← «$query»: ${hits.size} шт. " +
+                    hits.take(3).joinToString { "${it.title} (${it.year})" },
+            )
+        }
+        return hits
     }
 
     fun parseTmdbMovieDetails(body: String, fallback: CatalogHit? = null): CatalogHit? {
@@ -2797,24 +2853,58 @@ object TitleCatalog {
         return if (tv) parseTmdbTvDetails(body) else parseTmdbMovieDetails(body)
     }
 
-    private fun searchPoiskKinoMovie(media: MediaInfo): CatalogHit? {
+    private fun poiskKinoByTmdbId(tmdbId: Int, token: String): CatalogHit? {
+        val url = "https://api.poiskkino.dev/v1.4/movie?externalId.tmdb=$tmdbId&limit=1"
+        val body = get(url, apiKey = token) ?: return null
+        val short = parsePoiskKinoSearch(body).firstOrNull()
+            ?: runCatching {
+                parsePoiskKinoMovie(json.parseToJsonElement(body).jsonObject)
+            }.getOrNull()
+            ?: return null
+        if (short.actors.isNotEmpty() && short.genres.isNotEmpty()) return short
+        val id = short.catalogId ?: return short
+        val details = get("https://api.poiskkino.dev/v1.4/movie/$id", apiKey = token) ?: return short
+        return parsePoiskKinoMovieDetails(details, short) ?: short
+    }
+
+    private fun searchPoiskKinoMovie(media: MediaInfo, known: CatalogHit? = null): CatalogHit? {
         val token = poiskKinoToken() ?: return null
+        if (known?.site == "TMDB") {
+            known.catalogId?.let { id -> poiskKinoByTmdbId(id, token)?.let { return it } }
+        }
+        val probe = if (known != null) {
+            media.copy(
+                title = firstNonBlank(known.originalTitle, known.title) ?: media.title,
+                year = media.year ?: known.year,
+            )
+        } else {
+            media
+        }
+        val queries = if (known != null) {
+            (listOfNotNull(known.originalTitle, known.title, known.russianTitle)
+                .map(String::trim)
+                .filter(String::isNotEmpty) + primaryQueries(media.title))
+                .distinctBy { it.lowercase() }
+        } else {
+            primaryQueries(media.title)
+        }
         val collected = mutableListOf<CatalogHit>()
-        var queriesAfterFirstAnswer = 0
-        for (query in searchQueryLadder(media.title)) {
-            val url = "https://api.poiskkino.dev/v1.4/movie/search?query=${enc(query)}&limit=10"
-            val body = get(url, apiKey = token) ?: continue
-            collected += parsePoiskKinoSearch(body)
-            val best = pickBest(media, collected.distinctBy { it.catalogId })
+        var answered = 0
+        for (query in queries) {
+            val body = get(
+                "https://api.poiskkino.dev/v1.4/movie/search?query=${enc(query)}&limit=10",
+                apiKey = token,
+            ) ?: continue
+            val found = parsePoiskKinoSearch(body)
+            collected += found
+            val best = pickBest(probe, collected.distinctBy { it.catalogId })
             if (best != null) {
-                val detailsId = best.catalogId ?: return best
-                val details = get("https://api.poiskkino.dev/v1.4/movie/$detailsId", apiKey = token) ?: return best
+                val id = best.catalogId ?: return best
+                val details = get("https://api.poiskkino.dev/v1.4/movie/$id", apiKey = token) ?: return best
                 return parsePoiskKinoMovieDetails(details, best) ?: best
             }
-            if (collected.isNotEmpty()) {
-                queriesAfterFirstAnswer++
-                if (queriesAfterFirstAnswer >= 2) return null
-            }
+            if (found.isNotEmpty()) answered++
+            if (answered >= 2) return null
         }
         return null
     }
@@ -3034,6 +3124,10 @@ object TitleCatalog {
     private fun get(url: String, bearerToken: String? = null, apiKey: String? = null): String? {
         val host = runCatching { URI.create(url).host }.getOrNull().orEmpty()
         val service = serviceName(host)
+        if (Config.logCatalogQueries) {
+            val query = runCatching { URI.create(url).query }.getOrNull().orEmpty()
+            Talk.info("→ $service ${query.ifBlank { url.substringAfterLast('/') }}")
+        }
         if (host in blockedHosts) return null
         return runCatching {
             val builder = HttpRequest.newBuilder(URI.create(url))
