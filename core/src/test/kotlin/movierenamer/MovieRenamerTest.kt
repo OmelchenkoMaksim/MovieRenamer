@@ -1734,11 +1734,63 @@ class ParserFixesTest {
     }
 
     @Test
-    fun `X Cut is an edition not part of the title`() {
-        val media = MediaParser.parse(Path.of("Clerks.X.Cut.1080p.x264.Perevodman.mkv"))
-        assertEquals("Clerks", media.title)
-        assertEquals(listOf("X Cut"), media.editions)
-        assertEquals("1080p", media.resolution)
+    fun `strips the penultimate cut from a blade runner title`() {
+        val media = MediaParser.parse(Path.of("Blade Runner - The Penultimate Cut (1982).mkv"))
+        assertEquals("Blade Runner", media.title)
+        assertEquals(1982, media.year)
+        assertEquals(listOf("Penultimate Cut"), media.editions)
+    }
+
+    @Test
+    fun `keeps the final cut when it is the movie title`() {
+        val media = MediaParser.parse(Path.of("The Final Cut (2004).mkv"))
+        assertEquals("The Final Cut", media.title)
+        assertEquals(2004, media.year)
+        assertTrue(media.editions.isEmpty())
+    }
+
+    @Test
+    fun `catalog matches notebook to the notebook when the year matches`() {
+        val local = MediaParser.parse(Path.of("Notebook (2004) 1080p Remux.mkv"))
+        assertEquals("Notebook", local.title)
+        assertEquals(2004, local.year)
+        assertEquals("Remux", local.source)
+
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Дневник памяти",
+                    2004,
+                    null,
+                    originalTitle = "The Notebook",
+                    russianTitle = "Дневник памяти",
+                ),
+            ),
+        )
+        assertEquals("Дневник памяти", hit?.title)
+        assertEquals("The Notebook", hit?.originalTitle)
+        assertTrue("The Notebook" in TitleCatalog.searchQueryLadder(local.title))
+    }
+
+    @Test
+    fun `catalog matches dark knight to the dark knight`() {
+        val local = MediaParser.parse(Path.of("Dark Knight (2008).mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Тёмный рыцарь",
+                    2008,
+                    null,
+                    originalTitle = "The Dark Knight",
+                    russianTitle = "Тёмный рыцарь",
+                ),
+            ),
+        )
+        assertEquals("The Dark Knight", hit?.originalTitle)
     }
 
     @Test

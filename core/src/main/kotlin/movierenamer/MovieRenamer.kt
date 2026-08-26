@@ -1091,7 +1091,7 @@ object MediaParser {
     )
     private val seasonFolderRegex = Regex("""(?iu)^(?:(?:season|сезон)\s*\d{1,3}|S\d{1,2})$""")
     private val editionRegex = Regex(
-        """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|X[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED|RECOBBLED[ .\-\p{Pd}]?CUT|MARK[ .\-\p{Pd}]?(?:IV|4|V|5)|FULL[ .\-\p{Pd}]?SCREEN)$ASCII_END""",
+        """$ASCII_START((?:THE[ .\-\p{Pd}]+)?(?:PENULTIMATE|FINAL|ULTIMATE)[ .\-\p{Pd}]+CUT|OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|(?:THE[ .\-\p{Pd}]+)?DIRECTOR'?S[ .\-\p{Pd}]?CUT|X[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED|RECOBBLED[ .\-\p{Pd}]?CUT|MARK[ .\-\p{Pd}]?(?:IV|4|V|5)|FULL[ .\-\p{Pd}]?SCREEN)$ASCII_END""",
         asciiFlags,
     )
     private val languageRegex = Regex(
@@ -1139,6 +1139,7 @@ object MediaParser {
                 ?.let(::normalizeResolution),
             source = sourceRegex.find(metadataText)?.value?.let(::normalizeSource),
             editions = editionRegex.findAll(metadataText)
+                .filter { it.range.first > 0 }
                 .map { normalizeEdition(it.value) }
                 .distinct()
                 .toList(),
@@ -1203,15 +1204,18 @@ object MediaParser {
             seasonRegex.find(value)?.range?.first,
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
-            editionRegex.find(value)?.range?.first,
+            firstEditionIndex(value),
         ).minOrNull() ?: value.length
     }
 
     // 0100.03.05 Год релиза — последний 1888…сейчас+1 до тегов качества: 2001 и 2049 остаются в названии.
+    // Издание (Penultimate Cut) режет название, но год после него всё равно читаем.
     private fun movieTitleEndIndex(fileName: String): Int {
         val qualityIndex = firstQualityIndex(fileName)
+        val editionIndex = firstEditionIndex(fileName) ?: qualityIndex
         val lastYear = lastPlausibleYear(fileName.substring(0, qualityIndex))
-        return lastYear?.range?.first ?: qualityIndex
+        val yearIndex = lastYear?.range?.first ?: qualityIndex
+        return minOf(qualityIndex, editionIndex, yearIndex)
     }
 
     private fun extractReleaseYear(text: String): Int? {
@@ -1229,9 +1233,13 @@ object MediaParser {
             seasonRegex.find(value)?.range?.first,
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
-            editionRegex.find(value)?.range?.first,
             techTagRegex.find(value)?.range?.first,
         ).minOrNull() ?: value.length
+    }
+
+    // Издание в начале имени — это название фильма (The Final Cut), а не тег.
+    private fun firstEditionIndex(value: String): Int? {
+        return editionRegex.findAll(value).firstOrNull { it.range.first > 0 }?.range?.first
     }
 
     private fun languageMatches(value: String): Sequence<MatchResult> {
@@ -1239,7 +1247,7 @@ object MediaParser {
             firstPlausibleYear(value)?.range?.first,
             resolutionRegex.find(value)?.range?.first,
             sourceRegex.find(value)?.range?.first,
-            editionRegex.find(value)?.range?.first,
+            firstEditionIndex(value),
         ).minOrNull() ?: return emptySequence()
         return languageRegex.findAll(value).filter { it.range.first > metadataStart }
     }
@@ -1381,6 +1389,9 @@ object MediaParser {
             compact == "UNRATED" -> "Unrated"
             compact.startsWith("EXTENDED") -> "Extended"
             compact.contains("DIRECTOR") -> "Director's Cut"
+            compact.contains("PENULTIMATE") -> "Penultimate Cut"
+            compact.contains("ULTIMATE") && compact.contains("CUT") -> "Ultimate Cut"
+            compact.contains("FINAL") && compact.contains("CUT") -> "Final Cut"
             compact == "X CUT" -> "X Cut"
             compact == "THEATRICAL" -> "Theatrical"
             compact == "REMASTERED" -> "Remastered"
@@ -2167,9 +2178,18 @@ object TitleCatalog {
 
     fun titleKeys(value: String): Set<String> {
         val translit = latinToCyrillic(value)
-        return setOf(foldTitle(value), foldTitle(translit), foldSoft(value), foldSoft(translit))
+        val bases = setOf(foldTitle(value), foldTitle(translit), foldSoft(value), foldSoft(translit))
             .filter { it.isNotBlank() }
-            .toSet()
+        return (bases + bases.mapNotNull(::stripLeadingArticle)).toSet()
+    }
+
+    private val englishArticles = setOf("the", "a", "an")
+
+    private fun stripLeadingArticle(folded: String): String? {
+        val words = folded.split(" ").filter { it.isNotBlank() }
+        if (words.size < 2) return null
+        if (words.first() !in englishArticles) return null
+        return words.drop(1).joinToString(" ").takeIf { it.isNotBlank() }
     }
 
     // Русское и английское имя в одном файле: ищем и сравниваем каждую часть отдельно.
@@ -2240,8 +2260,16 @@ object TitleCatalog {
         } else {
             emptyList()
         }
-        return (searchQueries(title) + extra + shortenedQueries(title))
+        val withThe = if (shouldTryLeadingThe(title)) searchQueries("The $title") else emptyList()
+        return (searchQueries(title) + extra + withThe + shortenedQueries(title))
             .distinctBy { it.lowercase() }
+    }
+
+    private fun shouldTryLeadingThe(title: String): Boolean {
+        if (title.any { it in '\u0400'..'\u04FF' }) return false
+        val words = foldTitle(title).split(" ").filter { it.isNotBlank() }
+        if (words.isEmpty() || words.size > 4) return false
+        return words.first() !in englishArticles
     }
 
     fun shortenedQueries(title: String): List<String> {
