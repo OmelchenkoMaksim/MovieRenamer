@@ -1,6 +1,9 @@
 package movierenamer
 
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.PrintStream
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.text.Normalizer
@@ -165,7 +168,7 @@ class MovieRenamerTest {
             Path.of("The.Matrix.1999.1080p.BluRay.x264.RUS.ENG.mkv"),
         )
         assertEquals(
-            "The Matrix (1999) 1080p.mkv",
+            "The Matrix (1999) 1080p BluRay.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
     }
@@ -178,7 +181,7 @@ class MovieRenamerTest {
         try {
             val plan = RenamePlanner.planAll(library, listOf(video)).single()
             assertEquals(PlanStatus.READY, plan.status)
-            assertEquals("The Matrix (1999) 1080p.mkv", plan.proposedName)
+            assertEquals("The Matrix (1999) 1080p BluRay.mkv", plan.proposedName)
         } finally {
             Files.deleteIfExists(video)
             Files.deleteIfExists(library)
@@ -694,7 +697,7 @@ class MovieRenamerTest {
 
         assertEquals(
             "Dune — Дюна (2021) [Фантастика, Приключения, Драма] [Дени Вильнёв] " +
-                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p.mkv",
+                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p WEB-DL.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
     }
@@ -713,7 +716,7 @@ class MovieRenamerTest {
         )
         assertEquals(
             "Брат (1997) [Драма, Криминал] [Алексей Балабанов] " +
-                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p.mkv",
+                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p BluRay.mkv",
             NameFormatter.fileName(movie, "mkv"),
         )
 
@@ -721,7 +724,7 @@ class MovieRenamerTest {
             Path.of("Breaking Bad", "Breaking.Bad.S02E03.Bit.by.a.Dead.Bee.720p.WEB-DL.mkv"),
         )
         assertEquals(
-            "Breaking Bad S02E03 Bit by a Dead Bee 720p.mkv",
+            "Breaking Bad S02E03 Bit by a Dead Bee 720p WEB-DL.mkv",
             NameFormatter.fileName(episode, "mkv"),
         )
     }
@@ -827,7 +830,7 @@ class MovieRenamerTest {
     }
 
     @Test
-    fun `skips series in a PoiskKino search payload`() {
+    fun `keeps series in a PoiskKino search payload`() {
         val hits = TitleCatalog.parsePoiskKinoSearch(
             """
             {
@@ -854,9 +857,9 @@ class MovieRenamerTest {
             """.trimIndent(),
         )
 
-        assertEquals(1, hits.size)
-        assertEquals("Матрица", hits.single().russianTitle)
-        assertEquals(1999, hits.single().year)
+        assertEquals(2, hits.size)
+        assertEquals("Игра престолов", hits[0].russianTitle)
+        assertEquals("Матрица", hits[1].russianTitle)
     }
 
     @Test
@@ -1118,5 +1121,221 @@ class MovieRenamerTest {
         val previous = mapOf("The Matrix (1999) 1080p.mkv" to "The.Matrix.1999.mkv")
         val original = previous["The Matrix (1999) 1080p.mkv"] ?: "The Matrix (1999) 1080p.mkv"
         assertEquals("The.Matrix.1999.mkv", original)
+    }
+
+    @Test
+    fun `year-only titles keep the year as the name and do not treat it as the release year`() {
+        val nineteen = MediaParser.parse(Path.of("1917.1080p.BluRay.mkv"))
+        assertEquals("1917", nineteen.title)
+        assertNull(nineteen.year)
+        assertEquals("1080p", nineteen.resolution)
+        assertEquals("BluRay", nineteen.source)
+
+        val dated = MediaParser.parse(Path.of("1917.2019.1080p.mkv"))
+        assertEquals("1917", dated.title)
+        assertEquals(2019, dated.year)
+    }
+
+    @Test
+    fun `keeps extended edition in the formatted name`() {
+        val media = MediaParser.parse(
+            Path.of("Interstate.60.2002.Extended.Edition.WEBRip.1080p.by.Martokc.mkv"),
+        )
+        assertEquals("Interstate 60", media.title)
+        assertEquals(listOf("Extended"), media.editions)
+        assertTrue(NameFormatter.fileName(media, "mkv").contains("Extended"))
+    }
+
+    @Test
+    fun `strips recobbled cut and mark iv from a title without a year`() {
+        val media = MediaParser.parse(Path.of("The Thief and The Cobbler Recobbled Cut Mark IV.mkv"))
+        assertEquals("The Thief and The Cobbler", media.title)
+        assertNull(media.year)
+        assertEquals(listOf("Recobbled Cut", "Mark IV"), media.editions)
+    }
+
+    @Test
+    fun `parses remux and 576i as quality tags`() {
+        val media = MediaParser.parse(
+            Path.of("Незнайка.на.Луне.1997.576i.DVD.REMUX.mkv"),
+        )
+        assertEquals("Незнайка на Луне", media.title)
+        assertEquals(1997, media.year)
+        assertEquals("576i", media.resolution)
+        assertEquals("Remux", media.source)
+    }
+
+    @Test
+    fun `soft-folds yer and maps y after a vowel to short i`() {
+        assertEquals("ден радио", TitleCatalog.latinToCyrillic("Den Radio"))
+        assertEquals("незнайка на луне", TitleCatalog.latinToCyrillic("Neznayka na Lune"))
+        assertEquals("василевич", TitleCatalog.latinToCyrillic("Vasilyevich"))
+        assertEquals("о чём ещё говорят мужчины", TitleCatalog.latinToCyrillic("O chjom ewjo govorjat muzhchiny"))
+
+        val local = MediaParser.parse(Path.of("Den.Radio.(2008).BDRip.720p.AFM.mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "День радио",
+                    2008,
+                    null,
+                    originalTitle = "День радио",
+                    russianTitle = "День радио",
+                    originalLanguage = "ru",
+                ),
+            ),
+        )
+        assertEquals("День радио", hit?.title)
+    }
+
+    @Test
+    fun `does not transliterate an english title with function words`() {
+        val queries = TitleCatalog.searchQueries("Jackass The Movie")
+        assertTrue(queries.any { it.equals("Jackass The Movie", ignoreCase = true) })
+        assertFalse(queries.any { it.contains("яккасс") })
+    }
+
+    @Test
+    fun `without a year refuses an exact title that matches several years`() {
+        val local = MediaParser.parse(Path.of("Dune.mkv"))
+        assertNull(
+            TitleCatalog.pickBest(
+                local,
+                listOf(
+                    CatalogHit("TMDB", "Dune", 1984, null, originalTitle = "Dune"),
+                    CatalogHit("TMDB", "Dune", 2021, null, originalTitle = "Dune"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `capitalizes tmdb genres in the file name`() {
+        val media = MediaParser.parse(Path.of("Rocky.(1976).mkv")).copy(
+            originalTitle = "Rocky",
+            russianTitle = "Рокки",
+            originalLanguage = "en",
+            genres = listOf("драма", "спорт"),
+        )
+        assertTrue(NameFormatter.fileName(media, "mkv").contains("[Драма, Спорт]"))
+    }
+
+    @Test
+    fun `printer does not suggest a new name for an unclear file`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("home_video_vacation.mp4")
+        Files.createFile(video)
+        try {
+            val plan = RenamePlanner.planAll(library, listOf(video)).single()
+            val output = captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
+            assertTrue(output.contains("Статус: не разобрали — не трогаем"))
+            assertTrue(output.contains("Имя не разбирается — оставляем файл как есть"))
+            assertFalse(output.contains("Новое имя:"))
+        } finally {
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `revert cache merge keeps pairs from the previous run`() {
+        val cache = Files.createTempFile("revert-cache-", ".json")
+        val library = Files.createTempDirectory("library-")
+        try {
+            NameHistory.save(library, mapOf("The Matrix (1999).mkv" to "The.Matrix.1999.mkv"), cache)
+            val merged = NameHistory.load(cache).pairs + ("Dune — Дюна (2021).mkv" to "Dune.2021.mkv")
+            NameHistory.save(library, merged, cache)
+            val loaded = NameHistory.load(cache)
+            assertEquals("The.Matrix.1999.mkv", loaded.pairs["The Matrix (1999).mkv"])
+            assertEquals("Dune.2021.mkv", loaded.pairs["Dune — Дюна (2021).mkv"])
+        } finally {
+            Files.deleteIfExists(cache)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `renames a sidecar subtitle with the video`() {
+        val library = Files.createTempDirectory("library-")
+        val video = library.resolve("old.mkv")
+        val sub = library.resolve("old.srt")
+        Files.writeString(video, "media")
+        Files.writeString(sub, "subs")
+        val renamed = library.resolve("new.mkv")
+        try {
+            FileGuard.rename(library, video, renamed)
+            FileGuard.renameSidecars(library, video, renamed)
+            assertTrue(Files.exists(renamed))
+            assertTrue(Files.exists(library.resolve("new.srt")))
+            assertFalse(Files.exists(sub))
+        } finally {
+            Files.deleteIfExists(renamed)
+            Files.deleteIfExists(library.resolve("new.srt"))
+            Files.deleteIfExists(video)
+            Files.deleteIfExists(sub)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `skips sample trailer and extras videos`() {
+        val library = Files.createTempDirectory("library-")
+        val movie = library.resolve("The.Matrix.1999.mkv")
+        val sample = library.resolve("sample.mkv")
+        val extras = library.resolve("Extras")
+        Files.createDirectory(extras)
+        val extra = extras.resolve("behind-the-scenes.mkv")
+        Files.createFile(movie)
+        Files.createFile(sample)
+        Files.createFile(extra)
+        try {
+            val found = VideoScanner.findVideoFiles(library)
+            assertEquals(listOf("The.Matrix.1999.mkv"), found.map { it.fileName.toString() })
+        } finally {
+            Files.deleteIfExists(extra)
+            Files.deleteIfExists(extras)
+            Files.deleteIfExists(sample)
+            Files.deleteIfExists(movie)
+            Files.deleteIfExists(library)
+        }
+    }
+
+    @Test
+    fun `parses TMDB tv details for a series stored as one file`() {
+        val hit = TitleCatalog.parseTmdbTvDetails(
+            """
+            {
+              "id": 99952,
+              "name": "Незнайка на Луне",
+              "original_name": "Незнайка на Луне",
+              "original_language": "ru",
+              "first_air_date": "1997-12-01",
+              "vote_average": 7.2,
+              "genres": [{"id": 16, "name": "мультфильм"}],
+              "created_by": [{"name": "Александр Люткевич"}],
+              "credits": {
+                "cast": [{"name": "Кристина Орбакайте", "order": 0}]
+              }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("Незнайка на Луне", hit?.russianTitle)
+        assertEquals(1997, hit?.year)
+        assertEquals("https://www.themoviedb.org/tv/99952", hit?.pageUrl)
+        assertEquals(listOf("мультфильм"), hit?.genres)
+    }
+
+    private fun captureStdout(block: () -> Unit): String {
+        val buffer = ByteArrayOutputStream()
+        val original = System.out
+        System.setOut(PrintStream(buffer, true, StandardCharsets.UTF_8))
+        try {
+            block()
+        } finally {
+            System.setOut(original)
+        }
+        return buffer.toString(StandardCharsets.UTF_8)
     }
 }
