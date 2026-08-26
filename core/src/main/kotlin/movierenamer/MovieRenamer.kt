@@ -37,7 +37,6 @@ import kotlin.streams.asSequence
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -394,12 +393,12 @@ object Config {
 }
 
 // 0001.04 Режим задаётся в Main.kt.
-enum class WorkMode(val displayName: String, val isReadOnly: Boolean) {
-    PREVIEW("просмотр: что можно сделать", true),
-    RENAME("переименовать на месте", false),
-    COPY("копия с новым именем, оригинал оставить", false),
-    DEBUG("тренировка: samples читаем, results пишем", true),
-    REVERT("вернуть прошлые имена", false),
+enum class WorkMode(val displayName: String) {
+    PREVIEW("просмотр: что можно сделать"),
+    RENAME("переименовать на месте"),
+    COPY("копия с новым именем, оригинал оставить"),
+    DEBUG("тренировка: samples читаем, results пишем"),
+    REVERT("вернуть прошлые имена"),
 }
 
 data class LaunchSettings(
@@ -864,7 +863,7 @@ object MediaParser {
         asciiFlags,
     )
     private val leadingResolutionRegex = Regex(
-        """^[\p{Zs}\s]*\[(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|480|720|1080|2160|2K|4K|UHD|FullHD)\][\p{Zs}\s]*""",
+        """^[\p{Zs}\s]*\[(480i|480p|540p|576i|576p|720p|1080p|1440p|2160p|480|720|1080|2160|2K|4K|UHD|FullHD)][\p{Zs}\s]*""",
         asciiFlags,
     )
     private val sourceRegex = Regex(
@@ -880,7 +879,7 @@ object MediaParser {
         asciiFlags,
     )
     private val siteSuffixRegex = Regex(
-        """(?iu)[\s._]*[\[(](?:www[.\s])?[\p{L}\p{N}-]+\.(?:org|com|net|ru|info|tv|me|cc|biz)[\])]+$""",
+        """(?iu)[\s._]*[\[(](?:www[.\s])?[\p{L}\p{N}-]+\.(?:org|com|net|ru|info|tv|me|cc|biz)[)\]]+$""",
     )
     private val trailingSceneGroupRegex = Regex(
         """[\s._]+([A-Za-z]{2,5}-[A-Za-z0-9]{2,5}|[A-Z]{5,}|[A-Za-z]+\d{2,})$""",
@@ -2230,7 +2229,7 @@ object TitleCatalog {
             val russianTitle = root.str("title") ?: fallback?.russianTitle ?: fallback?.title
                 ?: return@runCatching null
             val apiOriginalTitle = root.str("original_title") ?: fallback?.originalTitle
-            val englishTitle = tmdbTranslatedTitle(root, "en")
+            val englishTitle = tmdbTranslatedTitle(root)
                 ?: fallback?.originalTitle?.takeIf(::hasLatinLetters)
                 ?: fallback?.title?.takeIf(::hasLatinLetters)
             val originalTitle = preferredOriginalTitle(apiOriginalTitle, englishTitle)
@@ -2279,7 +2278,7 @@ object TitleCatalog {
             val russianTitle = root.str("name") ?: fallback?.russianTitle ?: fallback?.title
                 ?: return@runCatching null
             val apiOriginalTitle = root.str("original_name") ?: fallback?.originalTitle
-            val englishTitle = tmdbTranslatedTitle(root, "en")
+            val englishTitle = tmdbTranslatedTitle(root)
                 ?: fallback?.originalTitle?.takeIf(::hasLatinLetters)
                 ?: fallback?.title?.takeIf(::hasLatinLetters)
             val originalTitle = preferredOriginalTitle(apiOriginalTitle, englishTitle)
@@ -2327,13 +2326,13 @@ object TitleCatalog {
         }.getOrNull()
     }
 
-    private fun tmdbTranslatedTitle(root: JsonObject, language: String): String? {
+    private fun tmdbTranslatedTitle(root: JsonObject): String? {
         val translations = runCatching {
             root["translations"]?.jsonObject?.get("translations")?.jsonArray
         }.getOrNull().orEmpty()
         return translations.firstNotNullOfOrNull { element ->
             val item = runCatching { element.jsonObject }.getOrNull() ?: return@firstNotNullOfOrNull null
-            if (!item.str("iso_639_1").equals(language, ignoreCase = true)) return@firstNotNullOfOrNull null
+            if (!item.str("iso_639_1").equals("en", ignoreCase = true)) return@firstNotNullOfOrNull null
             item["data"]?.jsonObject?.str("title")?.trim()?.takeIf { it.isNotEmpty() }
                 ?: item["data"]?.jsonObject?.str("name")?.trim()?.takeIf { it.isNotEmpty() }
         }
@@ -2549,7 +2548,7 @@ object TitleCatalog {
         return title
             .replace(
                 Regex(
-                    """(?iu)\s*\((?:[^)]*\b(?:film|movie|сериал|телесериал|мини-?сериал|фильм|tv series|television series|miniseries)\b[^)]*)\)\s*$""",
+                    """(?iu)\s*\([^)]*\b(?:film|movie|сериал|телесериал|мини-?сериал|фильм|tv series|television series|miniseries)\b[^)]*\)\s*$""",
                 ),
                 "",
             )
@@ -2568,10 +2567,6 @@ object TitleCatalog {
 
     private fun JsonObject.int(key: String): Int? {
         return runCatching { this[key]?.jsonPrimitive?.intOrNull }.getOrNull()
-    }
-
-    private fun JsonObject.bool(key: String): Boolean? {
-        return runCatching { this[key]?.jsonPrimitive?.booleanOrNull }.getOrNull()
     }
 
     private fun JsonObject.double(key: String): Double? {
