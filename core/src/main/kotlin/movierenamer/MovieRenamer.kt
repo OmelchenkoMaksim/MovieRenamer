@@ -1047,6 +1047,7 @@ object MediaParser {
     private const val ASCII_END = """(?![A-Za-z0-9])"""
 
     private val yearRegex = Regex("""$ASCII_START(18(?:8[8-9]|9\d)|19\d{2}|20\d{2})$ASCII_END""")
+    private val fourDigitNumberRegex = Regex("""$ASCII_START(\d{4})$ASCII_END""")
     private val seasonEpisodeRegex = Regex("""${ASCII_START}S(\d{1,2})E(\d{1,3})$ASCII_END""", asciiFlags)
     private val seasonRegex = Regex("""${ASCII_START}S\d{1,2}$ASCII_END""", asciiFlags)
     private val resolutionRegex = Regex(
@@ -1219,11 +1220,32 @@ object MediaParser {
     }
 
     private fun extractReleaseYear(text: String): Int? {
-        val qualityIndex = firstQualityIndex(text)
-        val years = plausibleYears(text.substring(0, qualityIndex))
+        val region = text.substring(0, firstQualityIndex(text))
+        confidentYearFromFourDigits(region)?.let { return it }
+        return releaseYearFallback(region)
+    }
+
+    // Ровно одна четвёрка цифр 1901…2049 — с высокой вероятностью год релиза.
+    // Две такие — не гадаем: это часто часть названия (2001, 2049).
+    private fun confidentYearFromFourDigits(region: String): Int? {
+        val matches = fourDigitNumberRegex.findAll(region)
+            .filter { match ->
+                val value = match.value.toInt()
+                value > 1900 && value < 2050
+            }
+            .toList()
+        if (matches.size != 1) return null
+        val match = matches.single()
+        val beforeYear = region.substring(0, match.range.first).trimReleaseSeparators()
+        if (beforeYear.isBlank()) return null
+        return match.value.toInt()
+    }
+
+    private fun releaseYearFallback(region: String): Int? {
+        val years = plausibleYears(region)
         if (years.isEmpty()) return null
         if (years.size >= 2) return years.last().value.toInt()
-        val beforeYear = text.substring(0, years.first().range.first).trimReleaseSeparators()
+        val beforeYear = region.substring(0, years.first().range.first).trimReleaseSeparators()
         return if (beforeYear.isBlank()) null else years.first().value.toInt()
     }
 

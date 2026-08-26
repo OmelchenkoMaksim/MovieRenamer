@@ -1465,6 +1465,36 @@ class MovieRenamerTest {
 class ParserFixesTest {
 
     @Test
+    fun `a single 4-digit number between 1900 and 2050 is the year`() {
+        val media = MediaParser.parse(Path.of("Notebook (2004) 1080p Remux.mkv"))
+        assertEquals("Notebook", media.title)
+        assertEquals(2004, media.year)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `1080 and 2160 are not treated as years`() {
+        val hd = MediaParser.parse(Path.of("Movie.1080p.mkv"))
+        assertNull(hd.year)
+        assertEquals("1080p", hd.resolution)
+
+        val uhd = MediaParser.parse(Path.of("Movie.2160p.mkv"))
+        assertNull(uhd.year)
+        assertEquals("2160p", uhd.resolution)
+    }
+
+    @Test
+    fun `two 4-digit year-like numbers skip the simple year guess`() {
+        val odyssey = MediaParser.parse(Path.of("2001.A.Space.Odyssey.1968.1080p.mkv"))
+        assertEquals("2001 A Space Odyssey", odyssey.title)
+        assertEquals(1968, odyssey.year)
+
+        val blade = MediaParser.parse(Path.of("Blade.Runner.2049.2017.UHD.mkv"))
+        assertEquals("Blade Runner 2049", blade.title)
+        assertEquals(2017, blade.year)
+    }
+
+    @Test
     fun `year-only title does not swallow quality tags`() {
         val media = MediaParser.parse(Path.of("movies", "1917.1080p.BluRay.mkv"))
         assertEquals("1917", media.title)
