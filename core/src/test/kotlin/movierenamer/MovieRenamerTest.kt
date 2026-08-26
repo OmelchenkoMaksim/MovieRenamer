@@ -12,6 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class MovieRenamerTest {
@@ -233,15 +234,32 @@ class MovieRenamerTest {
     fun `catalog matches a romanized russian title like brat to Брат`() {
         assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
         assertEquals(listOf("brat", "брат"), TitleCatalog.searchQueries("brat"))
-        assertEquals("ворошиловский стрелок", TitleCatalog.latinToCyrillic("Voroshilovskiy Strelok"))
+        assertEquals(
+            "ворошиловский стрелок",
+            TitleCatalog.latinToCyrillic("Voroshilovskiy Strelok")
+        )
         assertEquals("ворошиловский стрелок", TitleCatalog.latinToCyrillic("Voroshilovsky Strelok"))
 
         val local = MediaParser.parse(Path.of("brat.1997.dvdrip.mp4"))
         val hit = TitleCatalog.pickBest(
             local,
             listOf(
-                CatalogHit("ПоискКино", "Брат 2", 2000, null, originalTitle = "Brat 2", russianTitle = "Брат 2"),
-                CatalogHit("ПоискКино", "Брат", 1997, null, originalTitle = "Brat", russianTitle = "Брат"),
+                CatalogHit(
+                    "ПоискКино",
+                    "Брат 2",
+                    2000,
+                    null,
+                    originalTitle = "Brat 2",
+                    russianTitle = "Брат 2"
+                ),
+                CatalogHit(
+                    "ПоискКино",
+                    "Брат",
+                    1997,
+                    null,
+                    originalTitle = "Brat",
+                    russianTitle = "Брат"
+                ),
             ),
         )
 
@@ -527,7 +545,9 @@ class MovieRenamerTest {
         )
 
         assertEquals("Разборки в стиле кунг-фу", hit?.title)
-        assertTrue(TitleCatalog.searchQueries(local.title).any { it.equals("Kung Fu Hustle", ignoreCase = true) })
+        assertTrue(
+            TitleCatalog.searchQueries(local.title)
+                .any { it.equals("Kung Fu Hustle", ignoreCase = true) })
         assertTrue(TitleCatalog.searchQueries(local.title).any { it.contains("Разборки") })
     }
 
@@ -697,7 +717,7 @@ class MovieRenamerTest {
 
         assertEquals(
             "Dune — Дюна (2021) [Фантастика, Приключения, Драма] [Дени Вильнёв] " +
-                "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p WEB-DL.mkv",
+                    "[Тимоти Шаламе, Ребекка Фергюсон, Оскар Айзек] (8.2 TMDB) 2160p WEB-DL.mkv",
             NameFormatter.fileName(media, "mkv"),
         )
     }
@@ -716,7 +736,7 @@ class MovieRenamerTest {
         )
         assertEquals(
             "Брат (1997) [Драма, Криминал] [Алексей Балабанов] " +
-                "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p BluRay.mkv",
+                    "[Сергей Бодров мл., Виктор Сухоруков, Светлана Письмиченко] (7.9 TMDB) 1080p BluRay.mkv",
             NameFormatter.fileName(movie, "mkv"),
         )
 
@@ -932,7 +952,10 @@ class MovieRenamerTest {
             rating = 6.4,
             ratingSource = "TMDB",
         )
-        assertEquals("Dune — Дюна (2021) (6.4 TMDB) 1080p.mkv", NameFormatter.fileName(media, "mkv"))
+        assertEquals(
+            "Dune — Дюна (2021) (6.4 TMDB) 1080p.mkv",
+            NameFormatter.fileName(media, "mkv")
+        )
     }
 
     @Test
@@ -955,7 +978,14 @@ class MovieRenamerTest {
         val chosen = TitleCatalog.chooseMovieHit(
             local,
             tmdb = tmdb,
-            poiskKino = CatalogHit("ПоискКино", "Дюна", 2021, null, rating = 7.7, ratingSource = "КП"),
+            poiskKino = CatalogHit(
+                "ПоискКино",
+                "Дюна",
+                2021,
+                null,
+                rating = 7.7,
+                ratingSource = "КП"
+            ),
             fallbackHits = listOf(CatalogHit("iTunes", "Dune", 2021, null)),
         )
 
@@ -1064,7 +1094,10 @@ class MovieRenamerTest {
                 cache,
             )
             val loaded = NameHistory.load(cache)
-            assertEquals(library.toAbsolutePath().normalize(), loaded.directory?.toAbsolutePath()?.normalize())
+            assertEquals(
+                library.toAbsolutePath().normalize(),
+                loaded.directory?.toAbsolutePath()?.normalize()
+            )
             assertEquals("The.Matrix.1999.mkv", loaded.pairs["The Matrix (1999) 1080p.mkv"])
         } finally {
             Files.deleteIfExists(cache)
@@ -1148,7 +1181,8 @@ class MovieRenamerTest {
 
     @Test
     fun `strips recobbled cut and mark iv from a title without a year`() {
-        val media = MediaParser.parse(Path.of("The Thief and The Cobbler Recobbled Cut Mark IV.mkv"))
+        val media =
+            MediaParser.parse(Path.of("The Thief and The Cobbler Recobbled Cut Mark IV.mkv"))
         assertEquals("The Thief and The Cobbler", media.title)
         assertNull(media.year)
         assertEquals(listOf("Recobbled Cut", "Mark IV"), media.editions)
@@ -1170,7 +1204,10 @@ class MovieRenamerTest {
         assertEquals("ден радио", TitleCatalog.latinToCyrillic("Den Radio"))
         assertEquals("незнайка на луне", TitleCatalog.latinToCyrillic("Neznayka na Lune"))
         assertEquals("василевич", TitleCatalog.latinToCyrillic("Vasilyevich"))
-        assertEquals("о чём ещё говорят мужчины", TitleCatalog.latinToCyrillic("O chjom ewjo govorjat muzhchiny"))
+        assertEquals(
+            "о чём ещё говорят мужчины",
+            TitleCatalog.latinToCyrillic("O chjom ewjo govorjat muzhchiny")
+        )
 
         val local = MediaParser.parse(Path.of("Den.Radio.(2008).BDRip.720p.AFM.mkv"))
         val hit = TitleCatalog.pickBest(
@@ -1229,7 +1266,8 @@ class MovieRenamerTest {
         Files.createFile(video)
         try {
             val plan = RenamePlanner.planAll(library, listOf(video)).single()
-            val output = captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
+            val output =
+                captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
             assertTrue(output.contains("Статус: не разобрали — не трогаем"))
             assertTrue(output.contains("Имя не разбирается — оставляем файл как есть"))
             assertFalse(output.contains("Новое имя:"))
@@ -1251,7 +1289,8 @@ class MovieRenamerTest {
             catalog = null,
             note = "без года подходит несколько — The Father (2020); The Father (1979). Допишите год в имя файла",
         )
-        val output = captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
+        val output =
+            captureStdout { MediaPrinter.print(0, plan, WorkMode.PREVIEW, lookupOnline = true) }
         assertTrue(output.contains("Название: The Father"))
         assertTrue(output.contains("Допишите год"))
         assertFalse(output.contains("Новое имя:"))
@@ -1262,8 +1301,13 @@ class MovieRenamerTest {
         val cache = Files.createTempFile("revert-cache-", ".json")
         val library = Files.createTempDirectory("library-")
         try {
-            NameHistory.save(library, mapOf("The Matrix (1999).mkv" to "The.Matrix.1999.mkv"), cache)
-            val merged = NameHistory.load(cache).pairs + ("Dune — Дюна (2021).mkv" to "Dune.2021.mkv")
+            NameHistory.save(
+                library,
+                mapOf("The Matrix (1999).mkv" to "The.Matrix.1999.mkv"),
+                cache
+            )
+            val merged =
+                NameHistory.load(cache).pairs + ("Dune — Дюна (2021).mkv" to "Dune.2021.mkv")
             NameHistory.save(library, merged, cache)
             val loaded = NameHistory.load(cache)
             assertEquals("The.Matrix.1999.mkv", loaded.pairs["The Matrix (1999).mkv"])
@@ -1356,4 +1400,355 @@ class MovieRenamerTest {
         }
         return buffer.toString(StandardCharsets.UTF_8)
     }
+}
+
+
+class ParserFixesTest {
+
+    @Test
+    fun `year-only title does not swallow quality tags`() {
+        val media = MediaParser.parse(Path.of("movies", "1917.1080p.BluRay.mkv"))
+        assertEquals("1917", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `title year and release year stay distinct`() {
+        val media = MediaParser.parse(Path.of("movies", "1917.2019.1080p.mkv"))
+        assertEquals("1917", media.title)
+        assertEquals(2019, media.year)
+    }
+
+    @Test
+    fun `edition and source survive in the formatted name`() {
+        val name = NameFormatter.fileName(
+            movie(
+                title = "Interstate 60",
+                year = 2002,
+                originalTitle = "Interstate 60",
+                russianTitle = "Трасса 60",
+                resolution = "1080p",
+                source = "WEBRip",
+                editions = listOf("Extended"),
+            ),
+            "mkv",
+        )
+        assertTrue("Extended" in name, "lost edition: $name")
+        assertTrue("WEBRip" in name, "lost source: $name")
+        assertTrue("1080p" in name, "lost resolution: $name")
+    }
+
+    @Test
+    fun `formatted name round-trips through the parser`() {
+        val original = movie(
+            title = "Interstate 60",
+            year = 2002,
+            originalTitle = "Interstate 60",
+            russianTitle = "Трасса 60",
+            resolution = "1080p",
+            source = "WEBRip",
+            editions = listOf("Extended"),
+        )
+        val name = NameFormatter.fileName(original, "mkv")
+        val reparsed = MediaParser.parse(Path.of("movies", name))
+        assertEquals(2002, reparsed.year)
+        assertEquals("1080p", reparsed.resolution)
+        assertEquals("WEBRip", reparsed.source)
+        assertEquals(listOf("Extended"), reparsed.editions)
+        assertEquals(
+            name,
+            NameFormatter.fileName(
+                reparsed.copy(
+                    originalTitle = original.originalTitle,
+                    russianTitle = original.russianTitle,
+                ),
+                "mkv",
+            ),
+        )
+    }
+
+    @Test
+    fun `translit maps soft sign and short i`() {
+        assertEquals("незнайка на луне", TitleCatalog.latinToCyrillic("Neznayka na Lune"))
+        assertEquals(
+            "ворошиловский стрелок",
+            TitleCatalog.latinToCyrillic("Voroshilovskiy Strelok")
+        )
+        assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
+    }
+
+    @Test
+    fun `older translit cases still hold`() {
+        assertEquals(
+            "о чём говорят мужчины",
+            TitleCatalog.latinToCyrillic("O chjom govorjat muzhchiny")
+        )
+        assertEquals("мужчины", TitleCatalog.latinToCyrillic("muzhchiny"))
+        assertEquals(
+            "о чём ещё говорят мужчины",
+            TitleCatalog.latinToCyrillic("O chjom ewjo govorjat muzhchiny")
+        )
+    }
+
+    @Test
+    fun `Den Radio matches the russian title`() {
+        assertMatches("Den Radio", "День радио")
+    }
+
+    @Test
+    fun `Vasilyevich matches the russian patronymic`() {
+        assertMatches("Ivan Vasilyevich menyaet professiyu", "Иван Васильевич меняет профессию")
+    }
+
+    @Test
+    fun `adjective ending ye is not turned into a soft sign`() {
+        assertMatches("Mertvye dushi", "Мёртвые души")
+        assertMatches("Utomlyonnye solntsem", "Утомлённые солнцем")
+    }
+
+    @Test
+    fun `e and e-with-dots at the start of a word are the same letter`() {
+        assertMatches("Ekipazh", "Экипаж")
+        assertTrue(
+            TitleCatalog.titleKeys("Ekipazh").intersect(TitleCatalog.titleKeys("Экипаж 2"))
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun `typical romanized russian titles still match`() {
+        assertMatches("Ironiya sudby", "Ирония судьбы")
+        assertMatches("Serdtsa chetyryokh", "Сердца четырёх")
+        assertMatches("Beloe solntse pustyni", "Белое солнце пустыни")
+        assertMatches("Vyuga", "Вьюга")
+    }
+
+    @Test
+    fun `translit does not become a translation`() {
+        val fromFile = TitleCatalog.titleKeys("dune")
+        val fromCatalog = TitleCatalog.titleKeys("Дюна")
+        assertTrue(fromFile.intersect(fromCatalog).isEmpty())
+    }
+
+    @Test
+    fun `without a year several identical titles are a refusal`() {
+        val hits = listOf(
+            hit(title = "Дюна", year = 2021, id = 1),
+            hit(title = "Дюна", year = 1984, id = 2),
+        )
+        assertNull(TitleCatalog.pickBest(movie(title = "Дюна", year = null), hits))
+    }
+
+    @Test
+    fun `without a year a single title match is accepted`() {
+        val only = hit(title = "Чудаки", year = 2002, id = 1)
+        val hits = listOf(only, hit(title = "Чудаки 2", year = 2006, id = 2))
+        assertSame(only, TitleCatalog.pickBest(movie(title = "Чудаки", year = null), hits))
+    }
+
+    @Test
+    fun `a year splits identical titles`() {
+        val dune2021 = hit(title = "Дюна", year = 2021, id = 1)
+        val hits = listOf(dune2021, hit(title = "Дюна", year = 1984, id = 2))
+        assertSame(dune2021, TitleCatalog.pickBest(movie(title = "Дюна", year = 2021), hits))
+    }
+
+    @Test
+    fun `partial title match does not forgive a year gap`() {
+        val local = movie(title = "О чём евё говорят мужчины", year = 2011)
+        val wrong = hit(title = "О чём говорят мужчины", year = 2010, id = 1)
+        assertNull(TitleCatalog.pickBest(local, listOf(wrong)))
+    }
+
+    @Test
+    fun `partial title match with the exact year is accepted`() {
+        val local = movie(title = "О чём евё говорят мужчины", year = 2011)
+        val right = hit(title = "О чём ещё говорят мужчины", year = 2011, id = 1)
+        assertSame(right, TitleCatalog.pickBest(local, listOf(right)))
+    }
+
+    @Test
+    fun `query ladder shortens the title from both sides`() {
+        val queries = TitleCatalog.shortenedQueries("O chjom ewjo govorjat muzhchiny")
+        assertTrue("говорят мужчины" in queries, "missing short tail: $queries")
+    }
+
+    @Test
+    fun `short titles are not shortened`() {
+        assertTrue(TitleCatalog.shortenedQueries("Брат").isEmpty())
+    }
+
+    @Test
+    fun `bare 1080 is a resolution not part of the title`() {
+        val media = MediaParser.parse(Path.of("movies", "12 стульев.1080.mkv"))
+        assertEquals("12 стульев", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `HDTVRip and tracker suffix stay out of the title`() {
+        val media = MediaParser.parse(
+            Path.of(
+                "Ace_Ventura_Pet_Detective_HDTVRip_1080p_DVD9_DXVA_DIMAPIKS[torrents.ru].mkv",
+            ),
+        )
+        assertEquals("Ace Ventura Pet Detective", media.title)
+        assertEquals("1080p", media.resolution)
+        assertEquals("HDTVRip", media.source)
+    }
+
+    @Test
+    fun `HDDVDRip is a source not part of the title`() {
+        val media = MediaParser.parse(
+            Path.of("Ocean's.Eleven.HDDVDRip.1080p.x264.HANSMER.mkv"),
+        )
+        assertEquals("Ocean's Eleven", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+        assertEquals("HDDVDRip", media.source)
+    }
+
+    @Test
+    fun `trailing scene group is not part of the title`() {
+        val media = MediaParser.parse(Path.of("Клик с пультом hns-cl.mkv"))
+        assertEquals("Клик с пультом", media.title)
+    }
+
+    @Test
+    fun `X-Men at the end of a name is not stripped as a group`() {
+        val media = MediaParser.parse(Path.of("X-Men.mkv"))
+        assertEquals("X-Men", media.title)
+    }
+
+    @Test
+    fun `The Father is cut at the source tag`() {
+        val media = MediaParser.parse(Path.of("The.Father.BDRip.1080p.HD.m4v"))
+        assertEquals("The Father", media.title)
+        assertEquals("BDRip", media.source)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `short russian title matches the longer catalog title without a year`() {
+        val click = hit(title = "Клик: С пультом по жизни", year = 2006, id = 1)
+        assertSame(
+            click,
+            TitleCatalog.pickBest(movie(title = "Клик с пультом", year = null), listOf(click))
+        )
+    }
+
+    @Test
+    fun `The Father without a year does not take The Father of the Bride`() {
+        val bride = hit(title = "The Father of the Bride", year = 1991, id = 2)
+        assertNull(TitleCatalog.pickBest(movie(title = "The Father", year = null), listOf(bride)))
+    }
+
+    @Test
+    fun `The Father without a year and two films is a refusal`() {
+        assertNull(
+            TitleCatalog.pickBest(
+                movie(title = "The Father", year = null),
+                listOf(
+                    hit(title = "The Father", year = 2020, id = 1),
+                    hit(title = "The Father", year = 1979, id = 2),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `two Twelve Chairs films without a year is a refusal with a hint`() {
+        val local = movie(title = "12 стульев", year = null)
+        assertNull(
+            TitleCatalog.pickBest(
+                local,
+                listOf(
+                    hit(title = "12 стульев", year = 1971, id = 1),
+                    hit(title = "12 стульев", year = 1976, id = 2),
+                ),
+            ),
+        )
+        val note = TitleCatalog.noteFor(local)
+        assertTrue(note != null && "1971" in note && "1976" in note, "missing year hint: $note")
+    }
+
+    @Test
+    fun `X Cut is an edition not part of the title`() {
+        val media = MediaParser.parse(Path.of("Clerks.X.Cut.1080p.x264.Perevodman.mkv"))
+        assertEquals("Clerks", media.title)
+        assertEquals(listOf("X Cut"), media.editions)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `The Father without a year keeps the only dated hit`() {
+        val hopkins = hit(title = "The Father", year = 2020, id = 1)
+        assertSame(
+            hopkins,
+            TitleCatalog.pickBest(
+                movie(title = "The Father", year = null),
+                listOf(
+                    hit(title = "The Father", year = null, id = 2),
+                    hopkins,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `Prodolzenie is treated as a sequel marker`() {
+        assertEquals(
+            "о чем говорят мужчины продолжение",
+            TitleCatalog.latinToCyrillic("O chem govorjat muzhchiny Prodolzenie"),
+        )
+        val sequel = hit(title = "О чём ещё говорят мужчины", year = 2011, id = 2)
+        val original = hit(title = "О чём говорят мужчины", year = 2010, id = 1)
+        val local = movie(title = "O chem govorjat muzhchiny Prodolzenie", year = null)
+        assertSame(sequel, TitleCatalog.pickBest(local, listOf(original, sequel)))
+        assertNull(TitleCatalog.pickBest(local, listOf(original)))
+    }
+
+    private fun assertMatches(fromFile: String, fromCatalog: String) {
+        val left = TitleCatalog.titleKeys(fromFile)
+        val right = TitleCatalog.titleKeys(fromCatalog)
+        assertTrue(
+            left.intersect(right).isNotEmpty(),
+            "no match for '$fromFile' vs '$fromCatalog': $left vs $right",
+        )
+    }
+
+    private fun movie(
+        title: String,
+        year: Int?,
+        originalTitle: String? = null,
+        russianTitle: String? = null,
+        resolution: String? = null,
+        source: String? = null,
+        editions: List<String> = emptyList(),
+        languages: List<String> = emptyList(),
+    ) = MediaInfo(
+        mediaType = MediaType.MOVIE,
+        title = title,
+        year = year,
+        season = null,
+        episode = null,
+        episodeTitle = null,
+        resolution = resolution,
+        source = source,
+        editions = editions,
+        languages = languages,
+        originalTitle = originalTitle,
+        russianTitle = russianTitle,
+    )
+
+    private fun hit(title: String, year: Int?, id: Int) = CatalogHit(
+        site = "TMDB",
+        title = title,
+        year = year,
+        pageUrl = null,
+        russianTitle = title,
+        catalogId = id,
+    )
 }
