@@ -868,7 +868,7 @@ object MediaParser {
         asciiFlags,
     )
     private val sourceRegex = Regex(
-        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDRIP|DVDRIP|HDTV(?:[ .\-\p{Pd}]?RIP)?|4KRIP|UHDRIP|BDREMUX|DVDREMUX|REMUX|CAMRIP|SATRIP)$ASCII_END""",
+        """$ASCII_START(WEB[ .\-\p{Pd}]?DL(?:[ .\-\p{Pd}]?RIP)?|WEB[ .\-\p{Pd}]?RIP|BLU[ .\-\p{Pd}]?RAY|BDRIP|BRRIP|HDDVD(?:[ .\-\p{Pd}]?RIP)?|HD[ .\-\p{Pd}]DVD(?:[ .\-\p{Pd}]?RIP)?|HDRIP|DVDRIP|HDTV(?:[ .\-\p{Pd}]?RIP)?|4KRIP|UHDRIP|BDREMUX|DVDREMUX|REMUX|CAMRIP|SATRIP)$ASCII_END""",
         asciiFlags,
     )
     private val techTagRegex = Regex(
@@ -1164,6 +1164,8 @@ object MediaParser {
             "BLURAY" -> "BluRay"
             "BDRIP" -> "BDRip"
             "BRRIP" -> "BRRip"
+            "HDDVDRIP" -> "HDDVDRip"
+            "HDDVD" -> "HDDVD"
             "HDRIP" -> "HDRip"
             "DVDRIP" -> "DVDRip"
             "HDTVRIP" -> "HDTVRip"

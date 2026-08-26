@@ -194,6 +194,17 @@ class ParserFixesTest {
     }
 
     @Test
+    fun `HDDVDRip не часть названия`() {
+        val media = MediaParser.parse(
+            Path.of("Ocean's.Eleven.HDDVDRip.1080p.x264.HANSMER.mkv"),
+        )
+        assertEquals("Ocean's Eleven", media.title)
+        assertNull(media.year)
+        assertEquals("1080p", media.resolution)
+        assertEquals("HDDVDRip", media.source)
+    }
+
+    @Test
     fun `сцена-группа в конце не часть названия`() {
         val media = MediaParser.parse(Path.of("Клик с пультом hns-cl.mkv"))
         assertEquals("Клик с пультом", media.title)
