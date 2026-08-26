@@ -230,6 +230,8 @@ class MovieRenamerTest {
     fun `catalog matches a romanized russian title like brat to Брат`() {
         assertEquals("брат", TitleCatalog.latinToCyrillic("brat"))
         assertEquals(listOf("brat", "брат"), TitleCatalog.searchQueries("brat"))
+        assertEquals("ворошиловский стрелок", TitleCatalog.latinToCyrillic("Voroshilovskiy Strelok"))
+        assertEquals("ворошиловский стрелок", TitleCatalog.latinToCyrillic("Voroshilovsky Strelok"))
 
         val local = MediaParser.parse(Path.of("brat.1997.dvdrip.mp4"))
         val hit = TitleCatalog.pickBest(
@@ -242,6 +244,67 @@ class MovieRenamerTest {
 
         assertEquals("Брат", hit?.title)
         assertEquals(1997, hit?.year)
+    }
+
+    @Test
+    fun `catalog matches a romanized russian adjective ending like Voroshilovskiy`() {
+        val local = MediaParser.parse(Path.of("Voroshilovskiy Strelok (1999).mkv"))
+        assertEquals("Voroshilovskiy Strelok", local.title)
+        assertEquals(1999, local.year)
+
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Ворошиловский стрелок",
+                    1999,
+                    null,
+                    originalTitle = "Ворошиловский стрелок",
+                    russianTitle = "Ворошиловский стрелок",
+                    originalLanguage = "ru",
+                ),
+            ),
+        )
+
+        assertEquals("Ворошиловский стрелок", hit?.title)
+        assertEquals(1999, hit?.year)
+    }
+
+    @Test
+    fun `strips a scene by-group suffix and can take a year from the catalog`() {
+        val media = MediaParser.parse(Path.of("Jackass.The Movie.by.Junk666.avi"))
+        assertEquals("Jackass The Movie", media.title)
+        assertNull(media.year)
+
+        val hit = TitleCatalog.pickBest(
+            media,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Чудаки",
+                    2002,
+                    null,
+                    originalTitle = "Jackass: The Movie",
+                    russianTitle = "Чудаки",
+                ),
+            ),
+        )
+
+        assertEquals("Чудаки", hit?.title)
+        assertEquals(2002, hit?.year)
+        assertEquals("Jackass: The Movie", hit?.originalTitle)
+    }
+
+    @Test
+    fun `does not strip by in a title like Stand by Me`() {
+        val media = MediaParser.parse(Path.of("Stand.by.Me.1986.1080p.mkv"))
+        assertEquals("Stand by Me", media.title)
+        assertEquals(1986, media.year)
+        assertEquals("1080p", media.resolution)
+
+        val noYear = MediaParser.parse(Path.of("Stand.by.Me.mkv"))
+        assertEquals("Stand by Me", noYear.title)
     }
 
     @Test

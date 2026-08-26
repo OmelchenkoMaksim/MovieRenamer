@@ -161,7 +161,7 @@ object MovieRenamer {
         var historyDirectory: Path? = null
 
         plans.forEachIndexed { index, plan ->
-            MediaPrinter.print(index, plan, settings.mode)
+            MediaPrinter.print(index, plan, settings.mode, lookupOnline)
 
             when (settings.mode) {
                 WorkMode.PREVIEW, WorkMode.REVERT -> Unit
@@ -838,6 +838,9 @@ object MediaParser {
             """РУС|АНГЛ|УКР""" +
             """)(?![\p{L}\p{N}])""",
     )
+    // .by.Junk666 / .by.Martokc — одна метка группы в конце, не «by» внутри названия.
+    private val sceneByGroupRegex = Regex("""(?iu)[._]by[._]([\p{L}\p{N}-]+)$""")
+    private val spacedByGroupRegex = Regex("""(?iu)[\p{Zs}\s]+by[\p{Zs}\s]+([\p{L}\p{N}-]+)$""")
 
     fun parse(path: Path): MediaInfo {
         val originalName = normalizeUnicode(path.nameWithoutExtension)
@@ -987,6 +990,7 @@ object MediaParser {
     private fun normalizeReleaseName(value: String): String {
         return normalizeUnicode(value)
             .replace(leadingResolutionRegex, "")
+            .let(::stripReleaseGroupSuffix)
             .replace(Regex("""\p{Pd}"""), "-")
             .replace('.', ' ')
             .replace('\uFF0E', ' ')
@@ -996,8 +1000,25 @@ object MediaParser {
             .replace(wrappedYearRegex, " $1 ")
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .replace(sitePrefixRegex, "")
+            .let(::stripReleaseGroupSuffix)
             .replace(Regex("""[\p{Zs}\s]+"""), " ")
             .trim()
+    }
+
+    private fun stripReleaseGroupSuffix(value: String): String {
+        val scene = sceneByGroupRegex.find(value)
+        if (scene != null && looksLikeReleaseGroup(scene.groupValues[1])) {
+            return value.removeRange(scene.range).trim('.', '_', ' ')
+        }
+        val spaced = spacedByGroupRegex.find(value)
+        if (spaced != null && looksLikeReleaseGroup(spaced.groupValues[1])) {
+            return value.removeRange(spaced.range).trim('.', '_', ' ')
+        }
+        return value
+    }
+
+    private fun looksLikeReleaseGroup(token: String): Boolean {
+        return token.any { it.isDigit() } || token.length >= 5
     }
 
     private fun normalizeUnicode(value: String): String {
@@ -1332,7 +1353,7 @@ data class RevertSnapshot(
 )
 
 object MediaPrinter {
-    fun print(index: Int, plan: RenamePlan, mode: WorkMode) {
+    fun print(index: Int, plan: RenamePlan, mode: WorkMode, lookupOnline: Boolean = false) {
         val media = plan.media
         println("==================================================")
         println("${index + 1}. ${plan.file.fileName}")
@@ -1341,8 +1362,12 @@ object MediaPrinter {
         if (plan.reasons.isNotEmpty()) {
             println("Почему: ${plan.reasons.joinToString("; ")}")
         }
-        plan.catalog?.let { hit ->
+        val hit = plan.catalog
+        if (hit != null) {
             println("Каталог: ${hit.site} — ${hit.title}${hit.year?.let { " ($it)" } ?: ""}")
+        } else if (lookupOnline && media.title.isNotBlank() && media.title != "Название не определено") {
+            val year = media.year?.toString() ?: "без года"
+            println("Каталог: не нашли «${media.title}» ($year)")
         }
 
         if (mode == WorkMode.DEBUG) {
@@ -1680,6 +1705,16 @@ object TitleCatalog {
     // Латиница из релизов: brat → брат. Не перевод: dune не станет «Дюна».
     fun latinToCyrillic(value: String): String {
         var text = value.lowercase()
+        val endings = listOf(
+            Regex("""skiy\b""") to "ский",
+            Regex("""skij\b""") to "ский",
+            Regex("""sky\b""") to "ский",
+            Regex("""iy\b""") to "ий",
+            Regex("""yy\b""") to "ый",
+        )
+        for ((from, to) in endings) {
+            text = text.replace(from, to)
+        }
         val digraphs = listOf(
             "shch" to "щ",
             "yo" to "ё",
