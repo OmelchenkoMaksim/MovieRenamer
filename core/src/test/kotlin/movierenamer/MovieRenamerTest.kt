@@ -11,6 +11,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -1984,4 +1985,212 @@ class ParserFixesTest {
         russianTitle = title,
         catalogId = id,
     )
+}
+
+class LogFixesTest {
+
+    @Test
+    fun `apostrophe is not a word boundary`() {
+        assertTrue(
+            TitleCatalog.titleKeys("The Devils Advocate")
+                .intersect(TitleCatalog.titleKeys("The Devil's Advocate")).isNotEmpty(),
+        )
+        assertTrue(
+            TitleCatalog.titleKeys("Oceans Eleven")
+                .intersect(TitleCatalog.titleKeys("Ocean's Eleven")).isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun `duplicated year does not stay in the title`() {
+        val media = MediaParser.parse(Path.of("The Terminator 1984 (1984) Extended.mkv"))
+        assertEquals("The Terminator", media.title)
+        assertEquals(1984, media.year)
+        assertEquals(listOf("Extended"), media.editions)
+    }
+
+    @Test
+    fun `special edition is an edition not a title`() {
+        val media = MediaParser.parse(Path.of("Aliens Special Edition (1986) Open Matte 1080p.mkv"))
+        assertEquals("Aliens", media.title)
+        assertEquals(1986, media.year)
+        assertEquals(listOf("Special Edition", "Open Matte"), media.editions)
+    }
+
+    @Test
+    fun `first installment loses its number but sequels keep theirs`() {
+        assertEquals("The Godfather", TitleCatalog.stripFirstInstallment("The Godfather Part I"))
+        assertEquals("SAW", TitleCatalog.stripFirstInstallment("SAW I"))
+        assertEquals("Kill Bill", TitleCatalog.stripFirstInstallment("Kill Bill Vol. 1"))
+        assertNull(TitleCatalog.stripFirstInstallment("The Godfather Part II"))
+        assertNull(TitleCatalog.stripFirstInstallment("Rocky II"))
+        assertNull(TitleCatalog.stripFirstInstallment("Чудаки 2"))
+    }
+
+    @Test
+    fun `Godfather Part I matches The Godfather`() {
+        val local = MediaParser.parse(Path.of("The.Godfather.Part.I.1972.BDRip-AVC.Rus.Eng.mkv"))
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Крёстный отец",
+                    1972,
+                    null,
+                    originalTitle = "The Godfather",
+                    russianTitle = "Крёстный отец",
+                    catalogId = 238,
+                ),
+                CatalogHit(
+                    "TMDB",
+                    "Крёстный отец 2",
+                    1974,
+                    null,
+                    originalTitle = "The Godfather Part II",
+                    russianTitle = "Крёстный отец 2",
+                    catalogId = 240,
+                ),
+            ),
+        )
+        assertEquals("Крёстный отец", hit?.title)
+    }
+
+    @Test
+    fun `Rocky II does not fall back to Rocky`() {
+        val local = MediaParser.parse(Path.of("Rocky II (1979).mkv"))
+        assertNull(
+            TitleCatalog.pickBest(
+                local,
+                listOf(CatalogHit("TMDB", "Рокки", 1976, null, originalTitle = "Rocky", catalogId = 1366)),
+            ),
+        )
+    }
+
+    @Test
+    fun `anime release name is stripped down to the title`() {
+        val media = MediaParser.parse(
+            Path.of("[Beatrice-Raws] Mononoke Hime (Princess Mononoke) [DCPrip 1998x1080 HEVC TrueHD].mkv"),
+        )
+        assertEquals("Mononoke Hime (Princess Mononoke)", media.title)
+        assertEquals("1080p", media.resolution)
+        assertNull(media.year)
+        assertTrue("Princess Mononoke" in TitleCatalog.titleVariants(media.title))
+    }
+
+    @Test
+    fun `bracketed alternative title matches the english catalog entry`() {
+        val local = MediaParser.parse(
+            Path.of("[Beatrice-Raws] Mononoke Hime (Princess Mononoke) [DCPrip 1998x1080 HEVC TrueHD].mkv"),
+        )
+        val hit = TitleCatalog.pickBest(
+            local,
+            listOf(
+                CatalogHit(
+                    "TMDB",
+                    "Princess Mononoke",
+                    1997,
+                    null,
+                    originalTitle = "もののけ姫",
+                    catalogId = 128,
+                ),
+            ),
+        )
+        assertEquals(1997, hit?.year)
+    }
+
+    @Test
+    fun `two parts of one movie get different names`() {
+        val first = MediaParser.parse(Path.of("Кин-дза-дза! (1-ая серия) 1986, 1080p.mkv"))
+        val second = MediaParser.parse(Path.of("Кин-дза-дза! (2-ая серия) 1986, 1080p.mkv"))
+        assertEquals(1, first.part)
+        assertEquals(2, second.part)
+        assertNotEquals(
+            NameFormatter.fileName(first.copy(title = "Кин-дза-дза!"), "mkv"),
+            NameFormatter.fileName(second.copy(title = "Кин-дза-дза!"), "mkv"),
+        )
+    }
+
+    @Test
+    fun `part marker survives a second parse`() {
+        val media = MediaParser.parse(Path.of("Кин-дза-дза! (1-ая серия) 1986, 1080p.mkv"))
+        val name = NameFormatter.fileName(media, "mkv")
+        assertEquals(1, MediaParser.parse(Path.of("movies", name)).part)
+    }
+
+    @Test
+    fun `tmdb hint is read and kept out of the title`() {
+        val path = Path.of("Anatomie dune chute (2023) {tmdb-915935} 1080p BDRip.mkv")
+        assertEquals(915935, MediaParser.tmdbHint(path))
+        assertEquals("Anatomie dune chute", MediaParser.parse(path).title)
+        assertEquals(2023, MediaParser.parse(path).year)
+    }
+
+    @Test
+    fun `latin TMDB title is not a russian name and PoiskKino can fill it`() {
+        val local = MediaParser.parse(Path.of("FLOW (2024) 1080p BluRay.mkv"))
+        val tmdb = CatalogHit(
+            site = "TMDB",
+            title = "Flow",
+            year = 2024,
+            pageUrl = null,
+            originalTitle = "Flow",
+            russianTitle = "FLOW",
+            originalLanguage = "lv",
+            genres = listOf("мультфильм"),
+            directors = listOf("Gints Zilbalodis"),
+            actors = listOf("Cat"),
+            rating = 7.8,
+            ratingSource = "TMDB",
+        )
+        assertTrue(TitleCatalog.movieHitNeedsMoreData(tmdb))
+
+        val chosen = TitleCatalog.chooseMovieHit(
+            local,
+            tmdb,
+            CatalogHit(
+                site = "ПоискКино",
+                title = "Поток",
+                year = 2024,
+                pageUrl = null,
+                originalTitle = "Flow",
+                russianTitle = "Поток",
+                rating = 7.9,
+                ratingSource = "КП",
+            ),
+            fallbackHits = emptyList(),
+        )
+        assertEquals("Поток", chosen?.russianTitle)
+        assertEquals("Flow", chosen?.originalTitle)
+    }
+
+    @Test
+    fun `TMDB ru translation supplies a cyrillic title when the title field is latin`() {
+        val hit = TitleCatalog.parseTmdbMovieDetails(
+            """
+            {
+              "id": 1084736,
+              "title": "Flow",
+              "original_title": "Straume",
+              "original_language": "lv",
+              "release_date": "2024-08-30",
+              "vote_average": 8.1,
+              "genres": [{"id": 16, "name": "мультфильм"}],
+              "credits": {
+                "cast": [{"name": "Cat", "order": 0}],
+                "crew": [{"name": "Gints Zilbalodis", "job": "Director"}]
+              },
+              "translations": {
+                "translations": [
+                  {"iso_639_1": "en", "data": {"title": "Flow"}},
+                  {"iso_639_1": "ru", "data": {"title": "Поток"}}
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("Поток", hit?.russianTitle)
+        assertEquals("Straume", hit?.originalTitle)
+        assertFalse(TitleCatalog.movieHitNeedsMoreData(hit))
+    }
 }
