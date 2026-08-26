@@ -1710,6 +1710,98 @@ class ParserFixesTest {
         assertNull(TitleCatalog.pickBest(local, listOf(original)))
     }
 
+    @Test
+    fun `catalog matches a numbered first film like Матрица 1`() {
+        val local = MediaParser.parse(Path.of("Матрица 1 (1999) 2160p WEB-DL.mkv"))
+        assertEquals("Матрица 1", local.title)
+        assertEquals(1999, local.year)
+
+        val matrix = hit(title = "Матрица", year = 1999, id = 603)
+        val best = TitleCatalog.pickBest(
+            local,
+            listOf(
+                matrix,
+                hit(title = "Матрица: Перезагрузка", year = 2003, id = 604),
+            ),
+        )
+        assertSame(matrix, best)
+        assertTrue("Матрица" in TitleCatalog.searchQueryLadder(local.title))
+    }
+
+    @Test
+    fun `catalog matches Матрица 2 Перезагрузка to the official sequel title`() {
+        val local = MediaParser.parse(Path.of("Матрица 2 Перезагрузка (2003) 2160p WEB-DL.mkv"))
+        assertEquals("Матрица 2 Перезагрузка", local.title)
+        val reloaded = CatalogHit(
+            "TMDB",
+            "Матрица: Перезагрузка",
+            2003,
+            null,
+            originalTitle = "The Matrix Reloaded",
+            russianTitle = "Матрица: Перезагрузка",
+            catalogId = 604,
+        )
+        val best = TitleCatalog.pickBest(
+            local,
+            listOf(
+                hit(title = "Матрица", year = 1999, id = 603),
+                reloaded,
+                CatalogHit(
+                    "TMDB",
+                    "Матрица: Революция",
+                    2003,
+                    null,
+                    originalTitle = "The Matrix Revolutions",
+                    russianTitle = "Матрица: Революция",
+                    catalogId = 605,
+                ),
+            ),
+        )
+        assertEquals("Матрица: Перезагрузка", best?.title)
+        assertTrue("Матрица Перезагрузка" in TitleCatalog.searchQueryLadder(local.title))
+    }
+
+    @Test
+    fun `catalog matches Матрица 3 Революция to the official sequel title`() {
+        val local = MediaParser.parse(Path.of("Матрица 3 Революция (2003) 2160p WEB-DL.mkv"))
+        val revolutions = CatalogHit(
+            "TMDB",
+            "Матрица: Революция",
+            2003,
+            null,
+            originalTitle = "The Matrix Revolutions",
+            russianTitle = "Матрица: Революция",
+            catalogId = 605,
+        )
+        val best = TitleCatalog.pickBest(
+            local,
+            listOf(
+                hit(title = "Матрица", year = 1999, id = 603),
+                CatalogHit(
+                    "TMDB",
+                    "Матрица: Перезагрузка",
+                    2003,
+                    null,
+                    originalTitle = "The Matrix Reloaded",
+                    russianTitle = "Матрица: Перезагрузка",
+                    catalogId = 604,
+                ),
+                revolutions,
+            ),
+        )
+        assertEquals("Матрица: Революция", best?.title)
+    }
+
+    @Test
+    fun `a numbered sequel without a year does not take the original film`() {
+        assertNull(
+            TitleCatalog.pickBest(
+                movie(title = "Чудаки 2", year = null),
+                listOf(hit(title = "Чудаки", year = 2002, id = 1)),
+            ),
+        )
+    }
+
     private fun assertMatches(fromFile: String, fromCatalog: String) {
         val left = TitleCatalog.titleKeys(fromFile)
         val right = TitleCatalog.titleKeys(fromCatalog)

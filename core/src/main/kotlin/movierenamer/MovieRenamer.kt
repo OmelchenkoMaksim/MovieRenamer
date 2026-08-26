@@ -1849,11 +1849,17 @@ object TitleCatalog {
         val exactTitle = localKeys.intersect(hitKeys).isNotEmpty() ||
             localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } } ||
             isSequelTitleMatch(localTitle, candidateTitle)
+        // «Матрица 1» → «Матрица». Номер только в имени файла; без года это слишком скользко.
+        val strippedMatch = localYear != null &&
+            candidateYear != null &&
+            isNumberStrippedTitleMatch(localTitle, candidateTitle)
         // Без локального года каталог может дополнить данные только при точном названии.
         if (localYear == null && !exactTitle) return -1
 
         var points = if (exactTitle) {
             60
+        } else if (strippedMatch) {
+            50
         } else {
             val localWords = localKeys.maxBy { it.length }.split(" ").filter(String::isNotBlank).toSet()
             val hitWords = hitKeys.maxBy { it.length }.split(" ").filter(String::isNotBlank).toSet()
@@ -1891,6 +1897,10 @@ object TitleCatalog {
         "продолжение", "prodolzenie", "prodolzhenie", "sequel",
     )
     private val sequelSkipTokens = sequelTokens + setOf("ещё", "еще", "2", "ii")
+    private val numberingTokens = sequelTokens + setOf(
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+        "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+    )
 
     private fun isSequelTitleMatch(localTitle: String, candidateTitle: String): Boolean {
         if (!hasSequelToken(localTitle)) return false
@@ -1922,6 +1932,28 @@ object TitleCatalog {
         return setOf(strip(title), strip(latinToCyrillic(title)))
             .filter { it.isNotBlank() }
             .toSet()
+    }
+
+    private fun isNumberingToken(word: String): Boolean {
+        val folded = foldTitle(word)
+        val cyr = foldTitle(latinToCyrillic(word))
+        return folded in numberingTokens || cyr in numberingTokens
+    }
+
+    fun stripNumberingTokens(title: String): String {
+        return title.split(Regex("""\s+"""))
+            .filter { it.isNotBlank() && !isNumberingToken(it) }
+            .joinToString(" ")
+    }
+
+    private fun isNumberStrippedTitleMatch(localTitle: String, candidateTitle: String): Boolean {
+        val stripped = stripNumberingTokens(localTitle)
+        if (stripped.isBlank() || foldTitle(stripped) == foldTitle(localTitle)) return false
+        val localKeys = titleKeys(stripped)
+        val hitKeys = titleKeys(candidateTitle)
+        if (localKeys.isEmpty() || hitKeys.isEmpty()) return false
+        return localKeys.intersect(hitKeys).isNotEmpty() ||
+            localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } }
     }
 
     private fun foldTitle(value: String): String {
@@ -2006,16 +2038,9 @@ object TitleCatalog {
     }
 
     fun searchQueryLadder(title: String): List<String> {
-        val withoutSequel = title
-            .split(Regex("""\s+"""))
-            .filter { word ->
-                val folded = foldTitle(word)
-                val cyr = foldTitle(latinToCyrillic(word))
-                folded !in sequelTokens && cyr !in sequelTokens
-            }
-            .joinToString(" ")
-        val extra = if (withoutSequel.isNotBlank() && withoutSequel != title) {
-            searchQueries(withoutSequel)
+        val withoutNumbering = stripNumberingTokens(title)
+        val extra = if (withoutNumbering.isNotBlank() && withoutNumbering != title) {
+            searchQueries(withoutNumbering) + shortenedQueries(withoutNumbering)
         } else {
             emptyList()
         }
