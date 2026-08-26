@@ -901,7 +901,7 @@ object MediaParser {
     )
     private val seasonFolderRegex = Regex("""(?iu)^(?:(?:season|сезон)\s*\d{1,3}|S\d{1,2})$""")
     private val editionRegex = Regex(
-        """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED|RECOBBLED[ .\-\p{Pd}]?CUT|MARK[ .\-\p{Pd}]?(?:IV|4|V|5)|FULL[ .\-\p{Pd}]?SCREEN)$ASCII_END""",
+        """$ASCII_START(OPEN[ .\-\p{Pd}]?MATTE|UNRATED|EXTENDED(?:[ .\-\p{Pd}]?EDITION)?|DIRECTOR'?S[ .\-\p{Pd}]?CUT|X[ .\-\p{Pd}]?CUT|THEATRICAL|REMASTERED|RECOBBLED[ .\-\p{Pd}]?CUT|MARK[ .\-\p{Pd}]?(?:IV|4|V|5)|FULL[ .\-\p{Pd}]?SCREEN)$ASCII_END""",
         asciiFlags,
     )
     private val languageRegex = Regex(
@@ -1189,6 +1189,7 @@ object MediaParser {
             compact == "UNRATED" -> "Unrated"
             compact.startsWith("EXTENDED") -> "Extended"
             compact.contains("DIRECTOR") -> "Director's Cut"
+            compact == "X CUT" -> "X Cut"
             compact == "THEATRICAL" -> "Theatrical"
             compact == "REMASTERED" -> "Remastered"
             compact.startsWith("RECOBBLED") -> "Recobbled Cut"
@@ -1803,7 +1804,19 @@ object TitleCatalog {
             val rivals = winners.distinctBy { (hit, _) ->
                 hit.catalogId?.toString() ?: "${hit.site}|${hit.title}|${hit.year}"
             }
+            val years = rivals.mapNotNull { (hit, _) -> hit.year }.distinct()
+            if (years.size > 1) {
+                val list = rivals.take(3).joinToString("; ") { (hit, _) ->
+                    hit.title + (hit.year?.let { " ($it)" } ?: "")
+                }
+                notes[cacheKey(local)] =
+                    "без года подходит несколько — $list. Допишите год в имя файла"
+                return null
+            }
             if (rivals.size > 1) {
+                if (years.size == 1) {
+                    return rivals.first { (hit, _) -> hit.year == years.single() }.first
+                }
                 val list = rivals.take(3).joinToString("; ") { (hit, _) ->
                     hit.title + (hit.year?.let { " ($it)" } ?: "")
                 }
@@ -1832,7 +1845,8 @@ object TitleCatalog {
         if (localKeys.isEmpty() || hitKeys.isEmpty()) return -1
 
         val exactTitle = localKeys.intersect(hitKeys).isNotEmpty() ||
-            localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } }
+            localKeys.any { local -> hitKeys.any { hit -> isLongPrefixTitle(local, hit) } } ||
+            isSequelTitleMatch(localTitle, candidateTitle)
         // Без локального года каталог может дополнить данные только при точном названии.
         if (localYear == null && !exactTitle) return -1
 
@@ -1869,6 +1883,43 @@ object TitleCatalog {
         if (rest.first().isDigit()) return false
         val localWords = local.split(" ").filter { it.isNotBlank() }
         return localWords.size >= 3
+    }
+
+    private val sequelTokens = setOf(
+        "продолжение", "prodolzenie", "prodolzhenie", "sequel",
+    )
+    private val sequelSkipTokens = sequelTokens + setOf("ещё", "еще", "2", "ii")
+
+    private fun isSequelTitleMatch(localTitle: String, candidateTitle: String): Boolean {
+        if (!hasSequelToken(localTitle)) return false
+        if (!looksLikeSequelTitle(candidateTitle)) return false
+        return sequelCoreKeys(localTitle).intersect(sequelCoreKeys(candidateTitle)).isNotEmpty()
+    }
+
+    private fun hasSequelToken(title: String): Boolean {
+        val words = foldTitle(title).split(" ").filter(String::isNotBlank) +
+            foldTitle(latinToCyrillic(title)).split(" ").filter(String::isNotBlank)
+        return words.any { it in sequelTokens }
+    }
+
+    private fun looksLikeSequelTitle(title: String): Boolean {
+        if (hasSequelToken(title)) return true
+        val words = foldTitle(title).split(" ").filter(String::isNotBlank)
+        if (words.any { it == "ещё" || it == "еще" }) return true
+        val last = words.lastOrNull() ?: return false
+        return words.size >= 2 && (last == "2" || last == "ii")
+    }
+
+    private fun sequelCoreKeys(title: String): Set<String> {
+        fun strip(value: String): String {
+            return foldSoft(value)
+                .split(" ")
+                .filter { it.isNotBlank() && it !in sequelSkipTokens }
+                .joinToString(" ")
+        }
+        return setOf(strip(title), strip(latinToCyrillic(title)))
+            .filter { it.isNotBlank() }
+            .toSet()
     }
 
     private fun foldTitle(value: String): String {
@@ -1953,7 +2004,20 @@ object TitleCatalog {
     }
 
     fun searchQueryLadder(title: String): List<String> {
-        return (searchQueries(title) + shortenedQueries(title))
+        val withoutSequel = title
+            .split(Regex("""\s+"""))
+            .filter { word ->
+                val folded = foldTitle(word)
+                val cyr = foldTitle(latinToCyrillic(word))
+                folded !in sequelTokens && cyr !in sequelTokens
+            }
+            .joinToString(" ")
+        val extra = if (withoutSequel.isNotBlank() && withoutSequel != title) {
+            searchQueries(withoutSequel)
+        } else {
+            emptyList()
+        }
+        return (searchQueries(title) + extra + shortenedQueries(title))
             .distinctBy { it.lowercase() }
     }
 
@@ -2000,6 +2064,7 @@ object TitleCatalog {
             Regex("""sky\b""") to "ский",
             Regex("""iy\b""") to "ий",
             Regex("""yy\b""") to "ый",
+            Regex("""zenie\b""") to "жение",
         )
         for ((from, to) in endings) {
             text = text.replace(from, to)

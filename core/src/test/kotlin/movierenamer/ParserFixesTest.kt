@@ -254,6 +254,42 @@ class ParserFixesTest {
         assertTrue(note != null && "1971" in note && "1976" in note, "нет подсказки с годами: $note")
     }
 
+    @Test
+    fun `X Cut это версия а не часть названия`() {
+        val media = MediaParser.parse(Path.of("Clerks.X.Cut.1080p.x264.Perevodman.mkv"))
+        assertEquals("Clerks", media.title)
+        assertEquals(listOf("X Cut"), media.editions)
+        assertEquals("1080p", media.resolution)
+    }
+
+    @Test
+    fun `The Father без года принимает единственный год и игнорирует пустой`() {
+        val hopkins = hit(title = "The Father", year = 2020, id = 1)
+        assertSame(
+            hopkins,
+            TitleCatalog.pickBest(
+                movie(title = "The Father", year = null),
+                listOf(
+                    hit(title = "The Father", year = null, id = 2),
+                    hopkins,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `Prodolzenie это продолжение`() {
+        assertEquals(
+            "о чем говорят мужчины продолжение",
+            TitleCatalog.latinToCyrillic("O chem govorjat muzhchiny Prodolzenie"),
+        )
+        val sequel = hit(title = "О чём ещё говорят мужчины", year = 2011, id = 2)
+        val original = hit(title = "О чём говорят мужчины", year = 2010, id = 1)
+        val local = movie(title = "O chem govorjat muzhchiny Prodolzenie", year = null)
+        assertSame(sequel, TitleCatalog.pickBest(local, listOf(original, sequel)))
+        assertNull(TitleCatalog.pickBest(local, listOf(original)))
+    }
+
     private fun assertMatches(fromFile: String, fromCatalog: String) {
         val left = TitleCatalog.titleKeys(fromFile)
         val right = TitleCatalog.titleKeys(fromCatalog)
