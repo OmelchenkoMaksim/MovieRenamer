@@ -531,6 +531,20 @@ object Config {
         "webm",
         "ts",
         "m2ts",
+        "mts",
+        "m2t",
+        "mpg",
+        "mpeg",
+        "mpe",
+        "vob",
+        "wmv",
+        "asf",
+        "flv",
+        "f4v",
+        "ogm",
+        "ogv",
+        "rmvb",
+        "divx",
     )
 
     val debugSamples: Path = Path.of("debug", "samples")

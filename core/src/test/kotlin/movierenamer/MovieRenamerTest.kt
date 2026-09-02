@@ -114,6 +114,35 @@ class MovieRenamerTest {
     }
 
     @Test
+    fun `finds less common video extensions like mpg`() {
+        val directory = Files.createTempDirectory("фильмы-")
+        val videos = listOf(
+            "Матрица.1999.mpg",
+            "Дюна.2021.mpeg",
+            "Старый.фильм.2001.wmv",
+            "DVD.rip.2005.vob",
+        ).map { directory.resolve(it).also(Files::createFile) }
+        val ignored = directory.resolve("заметки.txt").also(Files::createFile)
+        try {
+            val found = VideoScanner.findVideoFiles(directory).map { it.fileName.toString() }
+            assertEquals(
+                listOf(
+                    "DVD.rip.2005.vob",
+                    "Дюна.2021.mpeg",
+                    "Матрица.1999.mpg",
+                    "Старый.фильм.2001.wmv",
+                ),
+                found,
+            )
+            assertFalse("заметки.txt" in found)
+        } finally {
+            videos.forEach { Files.deleteIfExists(it) }
+            Files.deleteIfExists(ignored)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
     fun `file guard does not treat paths outside the library as inside`() {
         val library = Files.createTempDirectory("library-")
         val outside = Files.createTempDirectory("outside-")
